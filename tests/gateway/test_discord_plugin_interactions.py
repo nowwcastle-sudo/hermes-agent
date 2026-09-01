@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.config import PlatformConfig
-from hermes_cli.discord_interactions import DiscordInteractions, decode_custom_id
+from hermes_cli.discord_interactions import (
+    DiscordInteractions,
+    decode_custom_id,
+    encode_custom_id,
+)
 from plugins.platforms.discord.adapter import DiscordAdapter
 import plugins.platforms.discord.adapter as discord_adapter_module
 from plugins.platforms.discord.plugin_interactions import (
@@ -45,6 +49,282 @@ def _message_spec() -> dict:
             }
         ],
     }
+
+
+def _fake_interaction(custom_id: str) -> SimpleNamespace:
+    response = SimpleNamespace(
+        is_done=MagicMock(return_value=False),
+        send_message=AsyncMock(),
+        send_modal=AsyncMock(),
+        defer=AsyncMock(),
+    )
+    return SimpleNamespace(
+        id=101,
+        data={"custom_id": custom_id, "component_type": 2},
+        user=SimpleNamespace(id=202, roles=[]),
+        guild_id=303,
+        channel_id=404,
+        message=SimpleNamespace(id=505),
+        response=response,
+        edit_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+
+class _FakeModal:
+    def __init__(self, *, title: str, custom_id: str):
+        self.title = title
+        self.custom_id = custom_id
+        self.children = []
+
+    def add_item(self, item) -> None:
+        self.children.append(item)
+
+
+class _FakeTextInput:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+def _allow_handler(monkeypatch, handler) -> None:
+    monkeypatch.setattr(
+        "plugins.platforms.discord.plugin_interactions._component_check_auth",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.plugin_interactions.get_plugin_manager",
+        lambda: SimpleNamespace(get_discord_interaction_handler=lambda _: handler),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.plugin_interactions.plugin_capability_granted",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        discord_adapter_module.discord.ui, "Modal", _FakeModal, raising=False
+    )
+    monkeypatch.setattr(
+        discord_adapter_module.discord.ui, "TextInput", _FakeTextInput, raising=False
+    )
+    monkeypatch.setattr(
+        discord_adapter_module.discord,
+        "TextStyle",
+        SimpleNamespace(short="short", paragraph="paragraph"),
+        raising=False,
+    )
+
+
+def _modal_result(action: str = "submit_answer") -> dict:
+    return {
+        "kind": "open_modal",
+        "modal": {
+            "api_version": 1,
+            "action": action,
+            "title": "Answer",
+            "fields": [
+                {
+                    "id": "answer",
+                    "label": "Your answer",
+                    "style": "short",
+                    "required": True,
+                    "min_length": 1,
+                    "max_length": 300,
+                }
+            ],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_owned_custom_id_returns_false_without_ack_or_callback() -> None:
+    bridge = DiscordPluginInteractionBridge(adapter=SimpleNamespace())
+    interaction = _fake_interaction("foreign.button")
+
+    owned = await bridge.handle_interaction(interaction)
+
+    assert owned is False
+    interaction.response.send_message.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.response.defer.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owned_malformed_custom_id_gets_one_bounded_ephemeral_ack() -> None:
+    bridge = DiscordPluginInteractionBridge(adapter=SimpleNamespace())
+    interaction = _fake_interaction("hdi1.malformed")
+
+    owned = await bridge.handle_interaction(interaction)
+
+    assert owned is True
+    interaction.response.is_done.assert_called_once_with()
+    interaction.response.send_message.assert_awaited_once()
+    kwargs = interaction.response.send_message.await_args.kwargs
+    assert kwargs["ephemeral"] is True
+    assert 1 <= len(interaction.response.send_message.await_args.args[0]) <= 200
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_owned_interaction_is_acked_without_callback(
+    monkeypatch,
+) -> None:
+    handler = AsyncMock(return_value={"kind": "no_change"})
+    adapter = SimpleNamespace(_allowed_user_ids=set(), _allowed_role_ids=set())
+    bridge = DiscordPluginInteractionBridge(adapter=adapter)
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit", "A" * 16)
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.plugin_interactions._component_check_auth",
+        lambda *_: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.plugin_interactions.get_plugin_manager",
+        lambda: SimpleNamespace(get_discord_interaction_handler=lambda _: handler),
+        raising=False,
+    )
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    interaction.response.send_message.assert_awaited_once()
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+    handler.assert_not_awaited()
+    interaction.response.defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_present", "capability_granted"),
+    [(False, True), (True, False)],
+)
+async def test_missing_or_revoked_handler_fails_closed_before_callback(
+    monkeypatch,
+    handler_present: bool,
+    capability_granted: bool,
+) -> None:
+    handler = AsyncMock(return_value={"kind": "no_change"})
+    adapter = SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    bridge = DiscordPluginInteractionBridge(adapter=adapter)
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit", "A" * 16)
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.plugin_interactions._component_check_auth",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.plugin_interactions.get_plugin_manager",
+        lambda: SimpleNamespace(
+            get_discord_interaction_handler=lambda _: handler if handler_present else None
+        ),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.plugin_interactions.plugin_capability_granted",
+        lambda *_: capability_granted,
+        raising=False,
+    )
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    interaction.response.send_message.assert_awaited_once()
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+    handler.assert_not_awaited()
+    interaction.response.defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_prefix_button_sends_modal_without_defer(monkeypatch) -> None:
+    handler = AsyncMock(return_value=_modal_result())
+    adapter = SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    bridge = DiscordPluginInteractionBridge(adapter=adapter)
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "open_anything", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    interaction.response.defer.assert_not_awaited()
+    handler.assert_awaited_once()
+    assert handler.await_args.args[0]["action"] == "open_anything"
+    interaction.response.send_modal.assert_awaited_once()
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, discord_adapter_module.discord.ui.Modal)
+    interaction.response.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_modal_id_inherits_host_route_and_payload_keeps_component_value(
+    monkeypatch,
+) -> None:
+    result = _modal_result(action="submit_inherited")
+    result["modal"]["fields"].append(
+        {
+            "id": "details",
+            "label": "Details",
+            "style": "paragraph",
+            "required": False,
+            "min_length": 0,
+            "max_length": 2_000,
+        }
+    )
+    handler = AsyncMock(return_value=result)
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("canonical-plugin", "open_form", "R" * 24, "choice-z")
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    payload = handler.await_args.args[0]
+    assert payload["component_value"] == "choice-z"
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert decode_custom_id(modal.custom_id) == {
+        "plugin_id": "canonical-plugin",
+        "action": "submit_inherited",
+        "route_token": "R" * 24,
+    }
+    assert [(field.custom_id, field.max_length) for field in modal.children] == [
+        ("answer", 300),
+        ("details", 2_000),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_open_button_defers_before_handler_then_updates(monkeypatch) -> None:
+    events = []
+
+    async def handler(payload):
+        events.append(("handler", payload["kind"]))
+        return {"kind": "update_message", "message": _message_spec()}
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "A" * 16)
+    )
+    interaction.response.defer.side_effect = lambda: events.append(("defer", None))
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert events == [("defer", None), ("handler", "button")]
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.edit_original_response.assert_awaited_once()
+    assert set(interaction.edit_original_response.await_args.kwargs) == {
+        "content",
+        "embeds",
+        "view",
+    }
+    interaction.response.send_message.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
 
 
 def test_renderer_uses_canonical_namespace_and_only_approved_native_fields() -> None:
