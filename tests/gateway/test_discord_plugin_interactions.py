@@ -351,6 +351,40 @@ async def test_listener_contains_bridge_exception_with_one_trace_and_no_private_
 
 
 @pytest.mark.asyncio
+async def test_listener_contains_namespace_inspection_exception_with_one_trace(
+    monkeypatch,
+    caplog,
+) -> None:
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"slash_commands": False},
+        )
+    )
+    created = _prepare_listener_connect(monkeypatch, adapter)
+    adapter._plugin_interactions.handle_interaction = AsyncMock()
+
+    class RaisingInteraction:
+        @property
+        def data(self):
+            raise RuntimeError("PRIVATE_NAMESPACE_DATA")
+
+    assert await adapter.connect() is True
+
+    await created[0].listeners["on_interaction"][0](RaisingInteraction())
+
+    adapter._plugin_interactions.handle_interaction.assert_not_awaited()
+    assert len(caplog.messages) == 1
+    trace_ids = re.findall(r"\b[0-9a-f]{32}\b", caplog.messages[0])
+    assert len(trace_ids) == 1
+    assert caplog.messages == [
+        f"discord_plugin_interaction_listener_failed trace={trace_ids[0]}"
+    ]
+    assert "PRIVATE_NAMESPACE_DATA" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_non_owned_custom_id_returns_false_without_ack_or_callback() -> None:
     bridge = DiscordPluginInteractionBridge(adapter=SimpleNamespace())
     interaction = _fake_interaction("foreign.button")

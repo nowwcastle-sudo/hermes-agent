@@ -1386,10 +1386,10 @@ class DiscordAdapter(BasePlatformAdapter):
             adapter_self = self  # capture for closure
 
             async def on_plugin_interaction(interaction):
-                data = getattr(interaction, "data", None) or {}
-                if not str(data.get("custom_id", "")).startswith("hdi1."):
-                    return
                 try:
+                    data = getattr(interaction, "data", None) or {}
+                    if not str(data.get("custom_id", "")).startswith("hdi1."):
+                        return
                     await adapter_self._plugin_interactions.handle_interaction(interaction)
                 except Exception:
                     logger.error(

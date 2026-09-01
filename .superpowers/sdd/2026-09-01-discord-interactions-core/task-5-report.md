@@ -105,3 +105,93 @@ paths:
 
 - The inherited Task 5A limitation remains unchanged: timing out an `asyncio.to_thread` plugin handler bounds host waiting but cannot terminate the worker or roll back side effects.
 - The previously deferred minor bridge-test gaps recorded in the Task 5A reports remain outside Task 5B listener scope.
+
+## Fix round 1/5 — listener namespace-inspection boundary
+
+### Status
+
+**DONE**
+
+The Task 5B Important defect is fixed without addressing either deferred Minor or Task 6. The existing listener `try` now starts before `interaction.data` access and therefore covers `getattr`, mapping `.get`, `str(custom_id)`, the `hdi1.` guard, the normal nonowned early return, and the bridge await. The failure path remains one fixed trace-only log event.
+
+### Strict RED→GREEN evidence
+
+Focused RED, after adding `test_listener_contains_namespace_inspection_exception_with_one_trace` and before changing production:
+
+```text
+uv run pytest tests/gateway/test_discord_plugin_interactions.py::test_listener_contains_namespace_inspection_exception_with_one_trace -q
+FAILED tests/gateway/test_discord_plugin_interactions.py::test_listener_contains_namespace_inspection_exception_with_one_trace
+RuntimeError: PRIVATE_NAMESPACE_DATA
+1 failed in 8.05s
+```
+
+The exception escaped from `plugins/platforms/discord/adapter.py:1389` at `getattr(interaction, "data", None)`, proving the test exercised the uncovered pre-bridge boundary.
+
+Focused GREEN after only expanding the existing `try` boundary:
+
+```text
+uv run pytest tests/gateway/test_discord_plugin_interactions.py::test_listener_contains_namespace_inspection_exception_with_one_trace -q
+1 passed in 2.81s
+```
+
+The test asserts normal listener return, no bridge await, exactly one fixed `discord_plugin_interaction_listener_failed trace=<32 lowercase hex>` message, and absence of the private namespace marker.
+
+### Fresh verification
+
+Listener-focused gate (the original six listener cases plus the new adversarial case):
+
+```text
+uv run pytest -q tests/gateway/test_discord_plugin_interactions.py -k "connect_registers or non_owned_interaction_coexists or owned_button_and_modal or reconnect_registers or listener_contains"
+7 passed, 42 deselected in 1.44s
+```
+
+Complete pre-existing 48-test bridge/listener file plus the new regression:
+
+```text
+uv run pytest -q tests/gateway/test_discord_plugin_interactions.py
+49 passed in 11.25s
+```
+
+Required regression gate:
+
+```text
+uv run pytest -q tests/hermes_cli/test_plugin_capabilities.py tests/hermes_cli/test_discord_interactions.py tests/gateway/test_discord_send.py tests/gateway/test_discord_clarify_buttons.py tests/gateway/test_discord_component_auth.py tests/gateway/test_discord_platform_events.py
+214 passed in 74.42s (0:01:14)
+```
+
+Targeted Ruff:
+
+```text
+uv run ruff check plugins/platforms/discord/adapter.py tests/gateway/test_discord_plugin_interactions.py
+All checks passed!
+```
+
+Diff/scope checks before report append:
+
+```text
+git diff --check
+exit 0, no output
+
+git diff --name-only
+plugins/platforms/discord/adapter.py
+tests/gateway/test_discord_plugin_interactions.py
+```
+
+Final staged credential scan covered only the approved adapter, test, and report paths and printed count/paths only:
+
+```text
+matches=0
+paths:
+```
+
+### Files and self-review
+
+- Modified `plugins/platforms/discord/adapter.py`: moved only the existing `try` start; logging and bridge semantics are unchanged.
+- Modified `tests/gateway/test_discord_plugin_interactions.py`: added one adversarial `interaction.data` property failure regression.
+- Appended this fix evidence to `.superpowers/sdd/2026-09-01-discord-interactions-core/task-5-report.md`.
+- Normal nonowned `hdi1.` guard behavior remains an early return inside the protected boundary; existing coexistence coverage passes.
+- No Task 5A bridge implementation, deferred Minor, Task 6, domain, dependency, deployment, history, or secret surface changed.
+
+### Concerns
+
+- No new concern. The inherited Task 5A `asyncio.to_thread` timeout limitation and previously deferred Minor test gaps remain unchanged and outside this fix round.
