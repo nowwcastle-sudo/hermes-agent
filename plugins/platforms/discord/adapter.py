@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -1069,6 +1070,11 @@ class DiscordAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.DISCORD)
         self._client: Optional[commands.Bot] = None
+        from plugins.platforms.discord.plugin_interactions import (
+            DiscordPluginInteractionBridge,
+        )
+
+        self._plugin_interactions = DiscordPluginInteractionBridge(self)
         self._ready_event = asyncio.Event()
         self._allowed_user_ids: set = set()  # For button approval authorization
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
@@ -3425,6 +3431,72 @@ class DiscordAdapter(BasePlatformAdapter):
         )
         kept.append(notice)
         return kept
+
+    async def plugin_interaction_send(
+        self, plugin_id: str, channel_id: str, spec: dict
+    ) -> dict:
+        """Send a plugin-owned Discord interaction message."""
+        try:
+            numeric_channel_id = int(channel_id)
+            channel = self._client.get_channel(numeric_channel_id)
+            if channel is None:
+                channel = await self._client.fetch_channel(numeric_channel_id)
+            message = await channel.send(
+                **self._plugin_interactions.build_message_kwargs(plugin_id, spec)
+            )
+            return {
+                "ok": True,
+                "channel_id": channel_id,
+                "message_id": str(message.id),
+                "error_code": "",
+            }
+        except (TypeError, ValueError):
+            return {"ok": False, "error_code": "invalid_argument"}
+        except discord.NotFound:
+            return {"ok": False, "error_code": "channel_not_found"}
+        except discord.Forbidden:
+            return {"ok": False, "error_code": "forbidden"}
+        except Exception:
+            logger.error(
+                "[Discord] Plugin interaction failed operation=%s plugin=%s trace=%s",
+                "send",
+                plugin_id,
+                uuid.uuid4().hex,
+            )
+            return {"ok": False, "error_code": "discord_error"}
+
+    async def plugin_interaction_update(
+        self,
+        plugin_id: str,
+        channel_id: str,
+        message_id: str,
+        spec: dict,
+    ) -> dict:
+        """Update a plugin-owned Discord interaction message."""
+        try:
+            numeric_channel_id = int(channel_id)
+            channel = self._client.get_channel(numeric_channel_id)
+            if channel is None:
+                channel = await self._client.fetch_channel(numeric_channel_id)
+            message = await channel.fetch_message(int(message_id))
+            await message.edit(
+                **self._plugin_interactions.build_message_kwargs(plugin_id, spec)
+            )
+            return {"ok": True, "error_code": ""}
+        except (TypeError, ValueError):
+            return {"ok": False, "error_code": "invalid_argument"}
+        except discord.NotFound:
+            return {"ok": False, "error_code": "message_not_found"}
+        except discord.Forbidden:
+            return {"ok": False, "error_code": "forbidden"}
+        except Exception:
+            logger.error(
+                "[Discord] Plugin interaction failed operation=%s plugin=%s trace=%s",
+                "update",
+                plugin_id,
+                uuid.uuid4().hex,
+            )
+            return {"ok": False, "error_code": "discord_error"}
 
     async def send(
         self,
