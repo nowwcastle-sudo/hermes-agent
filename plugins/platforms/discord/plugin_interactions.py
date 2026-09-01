@@ -255,6 +255,10 @@ class DiscordPluginInteractionBridge:
                     route["plugin_id"], route["route_token"], result["modal"]
                 )
             )
+        elif result["kind"] == "update_message" and not interaction.response.is_done():
+            await interaction.response.edit_message(
+                **self.build_message_kwargs(route["plugin_id"], result["message"])
+            )
         elif result["kind"] == "ephemeral":
             await self._ephemeral_once(interaction, result["content"])
         elif result["kind"] == "no_change":

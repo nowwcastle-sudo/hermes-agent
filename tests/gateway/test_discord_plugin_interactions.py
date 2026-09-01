@@ -63,6 +63,7 @@ def _fake_interaction(custom_id: str) -> SimpleNamespace:
         is_done=MagicMock(return_value=False),
         send_message=AsyncMock(),
         send_modal=AsyncMock(),
+        edit_message=AsyncMock(),
         defer=AsyncMock(),
     )
     return SimpleNamespace(
@@ -959,6 +960,33 @@ async def test_open_prefix_button_sends_modal_without_defer(monkeypatch) -> None
     modal = interaction.response.send_modal.await_args.args[0]
     assert isinstance(modal, discord_adapter_module.discord.ui.Modal)
     interaction.response.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_prefix_update_message_uses_one_initial_edit_ack(
+    monkeypatch,
+) -> None:
+    handler = AsyncMock(
+        return_value={"kind": "update_message", "message": _message_spec()}
+    )
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "open_dashboard", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    interaction.response.defer.assert_not_awaited()
+    handler.assert_awaited_once()
+    interaction.response.edit_message.assert_awaited_once()
+    assert interaction.response.edit_message.await_args.kwargs["content"] == "Choose one"
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.response.send_message.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

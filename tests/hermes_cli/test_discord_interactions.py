@@ -9,6 +9,7 @@ import pytest
 
 from gateway.config import Platform
 from hermes_cli.discord_interactions import (
+    CAPABILITY_ID,
     DiscordInteractions,
     decode_custom_id,
     encode_custom_id,
@@ -16,7 +17,10 @@ from hermes_cli.discord_interactions import (
     validate_message_spec,
     validate_modal_spec,
 )
-from hermes_cli.plugin_capabilities import CAPABILITY_REGISTRY
+from hermes_cli.plugin_capabilities import (
+    CAPABILITY_REGISTRY,
+    plugin_capability_granted,
+)
 from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 
 
@@ -786,6 +790,10 @@ def test_discord_interactions_capability_is_registered() -> None:
 
     assert spec.legacy_path == ("allow_discord_interactions",)
     assert "Discord" in spec.description
+
+
+def test_discord_interactions_capability_is_really_default_off() -> None:
+    assert plugin_capability_granted("cs-quiz", CAPABILITY_ID, config={}) is False
 
 
 def test_registration_is_default_off(monkeypatch) -> None:

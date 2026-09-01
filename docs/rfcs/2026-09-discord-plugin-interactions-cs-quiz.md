@@ -142,7 +142,7 @@ DiscordInteractionResult
 - no_change
 ```
 
-`open_modal`은 button interaction의 최초 응답에서만 허용한다. `답변 입력` button은 action을 `open_short_answer` 또는 `open_essay`로 encode하므로 state I/O 없이 정해진 Modal을 만들 수 있다. `modal_submit`은 `open_modal`을 반환할 수 없다. Host는 schema에 없는 field와 잘못된 result-kind 조합을 거절한다.
+`open_modal`은 button interaction의 최초 응답에서만 허용한다. `open_`은 host가 예약한 generic action prefix다. 모든 `open_*` button callback은 defer하지 않고 2초 timeout 안에서 최초 응답을 만들어야 한다. `답변 입력` button은 action을 `open_short_answer` 또는 `open_essay`로 encode하므로 state I/O 없이 정해진 Modal을 만들 수 있다. Plugin author는 일반적인 deferred 작업에 `open_*` action을 사용하면 안 된다. `modal_submit`은 `open_modal`을 반환할 수 없다. Host는 schema에 없는 field와 잘못된 result-kind 조합을 거절한다.
 
 ### 6.2 Registration
 
@@ -159,21 +159,32 @@ Namespace는 plugin 입력을 받지 않고 host가 `ctx.plugin_id`에서 파생
 - plugin unload/reload 때 registration 자동 해제
 - plugin ID collision 거절
 - gateway allowlist가 callback보다 먼저 적용
-- `open_modal` callback은 2초, deferred callback은 90초의 host timeout 적용
+- 모든 `open_*` button callback은 2초, 그 밖의 deferred callback은 90초의 host timeout 적용
 - callback timeout과 exception 격리
 - capability를 registration과 매 dispatch 때 재검사
+
+동기 callback은 `asyncio.to_thread`에서 실행한다. Timeout은 host가 worker를 기다리는 시간과 Discord 응답 latency만 제한한다. 이미 실행 중인 worker thread나 timeout 전 side effect를 강제 종료하거나 rollback할 수 없다. 따라서 trusted plugin은 host timeout보다 짧은 cooperative deadline을 callback과 I/O 경계에 전달·검사하고, durable transition을 idempotent하게 설계해야 한다. Commit 직전에는 deadline과 예상 revision을 다시 확인하여 deadline이 지난 결과나 revision mismatch를 거절하고 CAS로만 상태를 확정한다.
 
 ### 6.3 ACK policy
 
 | Interaction | Host 선처리 | Plugin 작업 |
 |---|---|---|
-| `답변 입력` button | allowlist와 route shape만 검사 | I/O 없이 즉시 `open_modal` 반환 |
+| 모든 `open_*` button | allowlist와 route shape만 검사, defer 없음, 2초 timeout | 아래 undeferred result/ACK matrix 중 하나를 즉시 반환 |
 | 선택지·보충·다음 button | 즉시 defer | 상태 검증·전이·render result |
 | modal submit | 즉시 defer | objective/essay 채점·render result |
 | malformed·unauthorized | 즉시 ephemeral | callback 호출 안 함 |
 | ACK `unknown interaction` 실패 | 중단 | 상태 변경 callback 호출 안 함 |
 
-모든 interaction은 정확히 한 번 ACK된다. `open_modal` 경로는 defer하지 않는다.
+Undeferred `open_*` result/ACK matrix:
+
+| Result | 정확한 최초 ACK |
+|---|---|
+| `open_modal` | `interaction.response.send_modal(...)` |
+| `update_message` | `interaction.response.edit_message(**rendered_kwargs)` |
+| `ephemeral` | `interaction.response.send_message(content, ephemeral=True)` |
+| `no_change` | bounded 안내를 `interaction.response.send_message(..., ephemeral=True)` |
+
+모든 interaction은 정확히 한 번 ACK된다. `open_*` 경로는 defer하지 않으며 initial response 뒤 `edit_original_response`나 follow-up을 추가로 보내지 않는다. Deferred `update_message`는 기존대로 `interaction.edit_original_response(**rendered_kwargs)`를 사용한다.
 
 ### 6.4 Send/update receipt
 
