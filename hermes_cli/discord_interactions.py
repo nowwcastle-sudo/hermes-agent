@@ -5,7 +5,12 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import re
+import uuid
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 CAPABILITY_ID = "gateway.discord_interactions"
 INTERACTIONS_CONTRACT_VERSION = 1
@@ -14,10 +19,153 @@ _PREFIX = "hdi1"
 _ACTION_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,43}$")
 _PLUGIN_B64_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_ID_RE = re.compile(r"^[0-9]+$")
 _BUTTON_STYLES = frozenset({"primary", "secondary", "success", "danger"})
 _ERROR = "Invalid Discord plugin custom ID"
 _MESSAGE_ERROR = "Invalid Discord message spec"
 _MODAL_ERROR = "Invalid Discord Modal spec"
+_ADAPTER_ERROR_CODES = frozenset(
+    {"invalid_argument", "channel_not_found", "message_not_found", "forbidden", "discord_error"}
+)
+
+
+def _error(code: str) -> dict[str, object]:
+    return {"ok": False, "error_code": code}
+
+
+def _normalize_failure_receipt(receipt: object) -> dict[str, object] | None:
+    if not isinstance(receipt, dict) or receipt.get("ok") is not False:
+        return None
+    error_code = receipt.get("error_code")
+    if not isinstance(error_code, str) or error_code not in _ADAPTER_ERROR_CODES:
+        return None
+    return _error(error_code)
+
+
+def _normalize_send_receipt(receipt: object, channel_id: str) -> dict[str, object]:
+    failure = _normalize_failure_receipt(receipt)
+    if failure is not None:
+        return failure
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("ok") is not True
+        or receipt.get("error_code") != ""
+        or receipt.get("channel_id") != channel_id
+        or not isinstance(receipt.get("message_id"), str)
+        or not _ID_RE.fullmatch(receipt["message_id"])
+    ):
+        return _error("invalid_adapter_receipt")
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "message_id": receipt["message_id"],
+        "error_code": "",
+    }
+
+
+def _normalize_update_receipt(receipt: object) -> dict[str, object]:
+    failure = _normalize_failure_receipt(receipt)
+    if failure is not None:
+        return failure
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("ok") is not True
+        or receipt.get("error_code") != ""
+    ):
+        return _error("invalid_adapter_receipt")
+    return {"ok": True, "error_code": ""}
+
+
+class DiscordInteractions:
+    """Per-plugin facade for Discord interaction message I/O."""
+
+    def __init__(self, plugin_id: str):
+        self._plugin_id = plugin_id
+
+    def _capability_granted(self) -> bool:
+        try:
+            from hermes_cli.plugin_capabilities import plugin_capability_granted
+
+            return plugin_capability_granted(self._plugin_id, CAPABILITY_ID)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _resolve_adapter() -> tuple[Any | None, dict[str, object] | None]:
+        from gateway.config import Platform
+
+        try:
+            from gateway.run import _gateway_runner_ref
+
+            runner = _gateway_runner_ref()
+        except Exception:
+            runner = None
+        if runner is None:
+            return None, _error("gateway_unavailable")
+        adapter = getattr(runner, "adapters", {}).get(Platform.DISCORD)
+        if adapter is None:
+            return None, _error("adapter_not_registered")
+        try:
+            connected = bool(adapter.is_connected)
+        except Exception:
+            connected = False
+        if not connected:
+            return None, _error("adapter_disconnected")
+        return adapter, None
+
+    def _gate(self, **ids: object) -> tuple[Any | None, dict[str, object] | None]:
+        if not self._capability_granted():
+            return None, _error("capability_not_granted")
+        if any(
+            not isinstance(value, str) or not _ID_RE.fullmatch(value)
+            for value in ids.values()
+        ):
+            return None, _error("invalid_argument")
+        return self._resolve_adapter()
+
+    async def _call(self, operation: Any, *args: object) -> tuple[object, dict[str, object] | None]:
+        try:
+            return await operation(*args), None
+        except Exception:
+            trace_id = uuid.uuid4().hex
+            logger.error(
+                "Discord interaction adapter call failed plugin=%s trace_id=%s",
+                self._plugin_id,
+                trace_id,
+            )
+            return None, _error("adapter_error")
+
+    async def send(self, channel_id: str, spec: dict) -> dict:
+        """Send one validated Discord interaction message."""
+        adapter, error = self._gate(channel_id=channel_id)
+        if error is not None or adapter is None:
+            return error or _error("gateway_unavailable")
+        try:
+            normalized = validate_message_spec(spec)
+        except ValueError:
+            return _error("invalid_argument")
+        receipt, error = await self._call(
+            adapter.plugin_interaction_send, channel_id, normalized
+        )
+        if error is not None:
+            return error
+        return _normalize_send_receipt(receipt, channel_id)
+
+    async def update(self, channel_id: str, message_id: str, spec: dict) -> dict:
+        """Update one validated Discord interaction message."""
+        adapter, error = self._gate(channel_id=channel_id, message_id=message_id)
+        if error is not None or adapter is None:
+            return error or _error("gateway_unavailable")
+        try:
+            normalized = validate_message_spec(spec)
+        except ValueError:
+            return _error("invalid_argument")
+        receipt, error = await self._call(
+            adapter.plugin_interaction_update, channel_id, message_id, normalized
+        )
+        if error is not None:
+            return error
+        return _normalize_update_receipt(receipt)
 
 
 def encode_custom_id(plugin_id: str, action: str, route_token: str) -> str:

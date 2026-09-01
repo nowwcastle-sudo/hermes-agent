@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import logging
+import re
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
+from gateway.config import Platform
 from hermes_cli.discord_interactions import (
+    DiscordInteractions,
     decode_custom_id,
     encode_custom_id,
     validate_interaction_result,
@@ -60,6 +67,326 @@ def valid_modal_spec(style: str = "short", max_length: int = 300) -> dict:
             }
         ],
     }
+
+
+def _granted_adapter(monkeypatch) -> SimpleNamespace:
+    adapter = SimpleNamespace(
+        is_connected=True,
+        plugin_interaction_send=AsyncMock(
+            return_value={
+                "ok": True,
+                "channel_id": "10",
+                "message_id": "20",
+                "error_code": "",
+            }
+        ),
+        plugin_interaction_update=AsyncMock(
+            return_value={"ok": True, "error_code": ""}
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "gateway.run._gateway_runner_ref",
+        lambda: SimpleNamespace(adapters={Platform.DISCORD: adapter}),
+    )
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_send_rechecks_capability_and_returns_normalized_receipt(
+    monkeypatch,
+) -> None:
+    receipt = {
+        "ok": True,
+        "channel_id": "10",
+        "message_id": "20",
+        "error_code": "",
+        "adapter_private": object(),
+    }
+    adapter = SimpleNamespace(
+        is_connected=True,
+        plugin_interaction_send=AsyncMock(return_value=receipt),
+    )
+    monkeypatch.setattr(
+        "gateway.run._gateway_runner_ref",
+        lambda: SimpleNamespace(adapters={Platform.DISCORD: adapter}),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        lambda *_: True,
+    )
+    spec = valid_message_spec()
+
+    result = await DiscordInteractions("cs-quiz").send("10", spec)
+
+    assert result == {
+        "ok": True,
+        "channel_id": "10",
+        "message_id": "20",
+        "error_code": "",
+    }
+    adapter.plugin_interaction_send.assert_awaited_once_with("10", spec)
+    assert result is not receipt
+
+
+@pytest.mark.asyncio
+async def test_update_revocation_fails_before_adapter(monkeypatch) -> None:
+    adapter = SimpleNamespace(
+        is_connected=True,
+        plugin_interaction_update=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "gateway.run._gateway_runner_ref",
+        lambda: SimpleNamespace(adapters={Platform.DISCORD: adapter}),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        lambda *_: False,
+    )
+
+    result = await DiscordInteractions("cs-quiz").update(
+        "10", "20", valid_message_spec()
+    )
+
+    assert result == {"ok": False, "error_code": "capability_not_granted"}
+    adapter.plugin_interaction_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_consent_read_failure_is_fail_closed(monkeypatch) -> None:
+    def fail_consent_read(*_args):
+        raise OSError("sensitive consent backend detail")
+
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        fail_consent_read,
+    )
+
+    result = await DiscordInteractions("cs-quiz").send("10", valid_message_spec())
+
+    assert result == {"ok": False, "error_code": "capability_not_granted"}
+
+
+@pytest.mark.asyncio
+async def test_send_gateway_unavailable_returns_stable_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        lambda *_: True,
+    )
+    monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: None)
+
+    result = await DiscordInteractions("cs-quiz").send("10", valid_message_spec())
+
+    assert result == {"ok": False, "error_code": "gateway_unavailable"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapters", "error_code"),
+    [
+        ({}, "adapter_not_registered"),
+        (
+            {Platform.DISCORD: SimpleNamespace(is_connected=False)},
+            "adapter_disconnected",
+        ),
+    ],
+)
+async def test_send_adapter_absent_or_disconnected_returns_stable_error(
+    monkeypatch, adapters: dict, error_code: str
+) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "gateway.run._gateway_runner_ref",
+        lambda: SimpleNamespace(adapters=adapters),
+    )
+
+    result = await DiscordInteractions("cs-quiz").send("10", valid_message_spec())
+
+    assert result == {"ok": False, "error_code": error_code}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id", [None, 10, "", " ", "-1", "1.0", "１２"])
+async def test_send_rejects_invalid_channel_id_before_adapter(
+    monkeypatch, channel_id: object
+) -> None:
+    adapter = _granted_adapter(monkeypatch)
+
+    result = await DiscordInteractions("cs-quiz").send(
+        channel_id, valid_message_spec()  # type: ignore[arg-type]
+    )
+
+    assert result == {"ok": False, "error_code": "invalid_argument"}
+    adapter.plugin_interaction_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel_id", "message_id"),
+    [("x", "20"), ("10", None), ("10", 20), ("10", ""), ("10", "2 0")],
+)
+async def test_update_rejects_invalid_ids_before_adapter(
+    monkeypatch, channel_id: object, message_id: object
+) -> None:
+    adapter = _granted_adapter(monkeypatch)
+
+    result = await DiscordInteractions("cs-quiz").update(
+        channel_id,  # type: ignore[arg-type]
+        message_id,  # type: ignore[arg-type]
+        valid_message_spec(),
+    )
+
+    assert result == {"ok": False, "error_code": "invalid_argument"}
+    adapter.plugin_interaction_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["send", "update"])
+async def test_send_and_update_reject_invalid_spec_without_raising(
+    monkeypatch, verb: str
+) -> None:
+    adapter = _granted_adapter(monkeypatch)
+    interactions = DiscordInteractions("cs-quiz")
+    invalid_spec = valid_message_spec()
+    invalid_spec["api_version"] = 2
+
+    if verb == "send":
+        result = await interactions.send("10", invalid_spec)
+    else:
+        result = await interactions.update("10", "20", invalid_spec)
+
+    assert result == {"ok": False, "error_code": "invalid_argument"}
+    adapter.plugin_interaction_send.assert_not_awaited()
+    adapter.plugin_interaction_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_calls_only_interaction_update_and_normalizes_success(
+    monkeypatch,
+) -> None:
+    adapter = _granted_adapter(monkeypatch)
+    receipt = {"ok": True, "error_code": "", "sdk_message": object()}
+    adapter.plugin_interaction_update.return_value = receipt
+    spec = valid_message_spec()
+
+    result = await DiscordInteractions("cs-quiz").update("10", "20", spec)
+
+    assert result == {"ok": True, "error_code": ""}
+    adapter.plugin_interaction_update.assert_awaited_once()
+    channel_id, message_id, normalized = adapter.plugin_interaction_update.await_args.args
+    assert (channel_id, message_id) == ("10", "20")
+    assert normalized == spec
+    assert normalized is not spec
+    adapter.plugin_interaction_send.assert_not_awaited()
+    assert result is not receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["send", "update"])
+async def test_adapter_failure_receipt_is_normalized(monkeypatch, verb: str) -> None:
+    adapter = _granted_adapter(monkeypatch)
+    receipt = {
+        "ok": False,
+        "error_code": "forbidden",
+        "exception": RuntimeError("private SDK detail"),
+    }
+    adapter.plugin_interaction_send.return_value = receipt
+    adapter.plugin_interaction_update.return_value = receipt
+    interactions = DiscordInteractions("cs-quiz")
+
+    if verb == "send":
+        result = await interactions.send("10", valid_message_spec())
+    else:
+        result = await interactions.update("10", "20", valid_message_spec())
+
+    assert result == {"ok": False, "error_code": "forbidden"}
+    assert result is not receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        None,
+        {},
+        {"ok": 1, "error_code": ""},
+        {"ok": True, "channel_id": "x", "message_id": "20", "error_code": ""},
+        {"ok": True, "channel_id": "10", "message_id": 20, "error_code": ""},
+        {"ok": False, "error_code": ""},
+    ],
+)
+async def test_send_rejects_malformed_adapter_receipt(
+    monkeypatch, receipt: object
+) -> None:
+    adapter = _granted_adapter(monkeypatch)
+    adapter.plugin_interaction_send.return_value = receipt
+
+    result = await DiscordInteractions("cs-quiz").send("10", valid_message_spec())
+
+    assert result == {"ok": False, "error_code": "invalid_adapter_receipt"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        None,
+        {},
+        {"ok": 1, "error_code": ""},
+        {"ok": True, "error_code": "unexpected"},
+        {"ok": False, "error_code": ""},
+    ],
+)
+async def test_update_rejects_malformed_adapter_receipt(
+    monkeypatch, receipt: object
+) -> None:
+    adapter = _granted_adapter(monkeypatch)
+    adapter.plugin_interaction_update.return_value = receipt
+
+    result = await DiscordInteractions("cs-quiz").update(
+        "10", "20", valid_message_spec()
+    )
+
+    assert result == {"ok": False, "error_code": "invalid_adapter_receipt"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["send", "update"])
+async def test_adapter_exception_returns_stable_error_and_logs_only_trace_id(
+    monkeypatch, caplog, verb: str
+) -> None:
+    adapter = _granted_adapter(monkeypatch)
+    sensitive_text = "API token=do-not-expose"
+    adapter.plugin_interaction_send.side_effect = RuntimeError(sensitive_text)
+    adapter.plugin_interaction_update.side_effect = RuntimeError(sensitive_text)
+    interactions = DiscordInteractions("cs-quiz")
+
+    with caplog.at_level(logging.ERROR, logger="hermes_cli.discord_interactions"):
+        if verb == "send":
+            result = await interactions.send("10", valid_message_spec())
+        else:
+            result = await interactions.update("10", "20", valid_message_spec())
+
+    assert result == {"ok": False, "error_code": "adapter_error"}
+    assert sensitive_text not in str(result)
+    assert sensitive_text not in caplog.text
+    assert re.search(r"trace_id=[0-9a-f]{32}\b", caplog.text)
+
+
+def test_plugin_context_discord_is_cached_and_bound_to_canonical_id() -> None:
+    ctx = _context(name="display-name", key="cs-quiz")
+
+    facade = ctx.discord
+
+    assert isinstance(facade, DiscordInteractions)
+    assert facade._plugin_id == "cs-quiz"
+    assert ctx.discord is facade
 
 
 def test_custom_id_round_trip_and_limit() -> None:

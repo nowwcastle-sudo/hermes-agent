@@ -1445,6 +1445,7 @@ class PluginContext:
         self._state: PluginState | None = None
         # Lazy-built capability-gated platform action facade (#64176).
         self._platform_actions: Any = None
+        self._discord: Any = None
 
     @property
     def plugin_id(self) -> str:
@@ -1574,6 +1575,15 @@ class PluginContext:
 
             self._platform_actions = PlatformActions(self.plugin_id)
         return self._platform_actions
+
+    @property
+    def discord(self):
+        """Return this plugin's cached Discord interaction message facade."""
+        if self._discord is None:
+            from hermes_cli.discord_interactions import DiscordInteractions
+
+            self._discord = DiscordInteractions(self.plugin_id)
+        return self._discord
 
     def _track(
         self,
