@@ -134,7 +134,7 @@ class DiscordPluginInteractionBridge:
             "message_id": str(interaction.message.id),
             "modal_values": modal_values,
         }
-        if "component_value" in route:
+        if payload["kind"] == "button" and "component_value" in route:
             payload["component_value"] = route["component_value"]
         return payload
 

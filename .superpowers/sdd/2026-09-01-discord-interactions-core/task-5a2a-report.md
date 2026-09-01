@@ -173,3 +173,66 @@ paths:
 ## Concerns
 
 None within 5A-2a scope. General handler execution/error/result semantics remain intentionally incomplete until Core Task 5A-2b.
+
+## Fix Round 1 — 5A-2a Important payload finding
+
+### Scope
+
+Fixed only the reviewed Important per-kind payload violation. The exact payload test now uses an adversarial modal-submit custom ID with a fifth decoded `component_value` segment while preserving nested `modal_values`; the bridge emits `component_value` only when the normalized payload kind is `button`. Deferred Minors and 5A-2b/5B remain untouched.
+
+### Strict RED to GREEN evidence
+
+RED after changing only the exact payload test:
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/gateway/test_discord_plugin_interactions.py::test_button_and_modal_payloads_have_exact_json_v1_fields
+FAILED tests/gateway/test_discord_plugin_interactions.py::test_button_and_modal_payloads_have_exact_json_v1_fields
+At index 1 diff: modal payload unexpectedly contained 'component_value': 'injected-button-value'
+1 failed in 1.18s
+```
+
+GREEN after the minimal `payload["kind"] == "button"` guard:
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/gateway/test_discord_plugin_interactions.py::test_button_and_modal_payloads_have_exact_json_v1_fields
+1 passed in 3.17s
+```
+
+The complete-dictionary assertion proves the button retains `component_value`, the adversarial modal excludes it, and modal `modal_values` remains exactly `{"answer": "two"}`. The existing `json.dumps` assertion still covers both payloads.
+
+### Regression verification
+
+Entire bridge tests:
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/gateway/test_discord_plugin_interactions.py
+26 passed in 12.51s
+```
+
+Tasks 2–4/auth/clarify regressions:
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/hermes_cli/test_plugin_capabilities.py tests/hermes_cli/test_discord_interactions.py tests/gateway/test_discord_send.py tests/gateway/test_discord_clarify_buttons.py tests/gateway/test_discord_component_auth.py tests/gateway/test_discord_platform_events.py
+214 passed in 64.77s
+```
+
+Ruff:
+
+```text
+uv run --no-project --python 3.11 --with ruff ruff check plugins/platforms/discord/plugin_interactions.py tests/gateway/test_discord_plugin_interactions.py
+All checks passed!
+```
+
+Diff check before staging:
+
+```text
+git diff --check
+exit 0, no output
+```
+
+Staged credential scan over only the three approved bridge, test, and report paths (JSON reduced to count and matching paths; no values printed):
+
+```text
+matches=0
+paths:
+```

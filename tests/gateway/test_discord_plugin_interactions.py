@@ -422,7 +422,9 @@ async def test_button_and_modal_payloads_have_exact_json_v1_fields(monkeypatch) 
         encode_custom_id("plugin-one", "submit_choice", "A" * 16, "choice-a")
     )
     modal = _fake_modal_submit(
-        encode_custom_id("plugin-one", "submit_answer", "B" * 16),
+        encode_custom_id(
+            "plugin-one", "submit_answer", "B" * 16, "injected-button-value"
+        ),
         [{"components": [{"custom_id": "answer", "value": "two"}]}],
     )
     _allow_handler(monkeypatch, handler)
