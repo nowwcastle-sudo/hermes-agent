@@ -126,6 +126,7 @@ def validate_message_spec(spec: dict) -> dict:
             or not _TOKEN_RE.fullmatch(component["route_token"])
             or not isinstance(component["label"], str)
             or not 1 <= len(component["label"]) <= 70
+            or not isinstance(component["style"], str)
             or component["style"] not in _BUTTON_STYLES
             or type(component["disabled"]) is not bool
             or (
@@ -183,6 +184,7 @@ def validate_modal_spec(spec: dict) -> dict:
             or field["id"] in field_ids
             or not isinstance(field["label"], str)
             or not 1 <= len(field["label"]) <= 45
+            or not isinstance(style, str)
             or style not in {"short", "paragraph"}
             or type(field["required"]) is not bool
             or type(field["min_length"]) is not int
@@ -202,6 +204,8 @@ def validate_interaction_result(result: dict, *, interaction_kind: str) -> dict:
     if not isinstance(normalized, dict):
         raise ValueError(error)
     kind = normalized.get("kind")
+    if not isinstance(kind, str):
+        raise ValueError(error)
     if kind == "open_modal" and interaction_kind != "button":
         raise ValueError("open_modal is only valid for a button interaction")
     if interaction_kind not in {"button", "modal_submit"}:

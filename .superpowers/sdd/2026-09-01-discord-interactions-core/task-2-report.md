@@ -151,3 +151,69 @@ A diagnostic run of the entire ownership-ledger file returned `3 failed, 24 pass
 - `test_direct_plugin_platform_registration_infers_immutable_scope`
 
 The failures are in pre-existing multi-profile tool/provider/platform registry scope behavior. Task 2 changes do not modify `tools.registry`, image-provider registry, platform registry, or Hermes-home override handling, and all directly relevant lifecycle regressions pass. Per the approved narrow scope, no unrelated fix was attempted.
+
+## Fix Round 1 — Important validator finding
+
+Added focused parameterized regressions for JSON-valid `[]` and `{}` values at button `style`, Modal field `style`, and interaction result `kind`. Added only explicit string-type guards immediately before the relevant set/dictionary membership operations; existing unknown-key and budget checks remain unchanged.
+
+### RED
+
+Before the production change:
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest pytest -q tests/hermes_cli/test_discord_interactions.py -k 'non_string_button_style or non_string_field_style or non_string_kind'
+FFFFFF                                                                   [100%]
+6 failed, 68 deselected in 1.78s
+```
+
+All six failures escaped the validators as the expected raw errors:
+
+```text
+TypeError: unhashable type: 'list'
+TypeError: unhashable type: 'dict'
+```
+
+The two errors occurred for each of button style, Modal field style, and interaction result kind.
+
+### GREEN
+
+After adding the three explicit string checks:
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest pytest -q tests/hermes_cli/test_discord_interactions.py -k 'non_string_button_style or non_string_field_style or non_string_kind'
+......                                                                   [100%]
+6 passed, 68 deselected in 7.97s
+```
+
+### Fix Round 1 verification
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest pytest -q tests/hermes_cli/test_discord_interactions.py tests/hermes_cli/test_plugin_capabilities.py
+........................................................................ [ 63%]
+.........................................                                [100%]
+113 passed in 26.70s
+```
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest pytest -q tests/hermes_cli/test_plugin_ownership_ledger.py::test_load_force_reload_and_unload_remove_every_manager_registration tests/hermes_cli/test_plugin_ownership_ledger.py::test_manager_local_override_does_not_resurrect_after_targeted_unload tests/hermes_cli/test_plugin_ownership_ledger.py::test_spawned_supervised_task_is_cancelled_on_unload tests/hermes_cli/test_plugin_ownership_ledger.py::test_on_unload_exception_does_not_block_other_teardown
+....                                                                     [100%]
+4 passed in 1.98s
+```
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest pytest -q tests/hermes_cli/test_plugins.py -k 'force_reload or unload_all'
+..                                                                       [100%]
+2 passed, 63 deselected in 0.96s
+```
+
+```text
+uv run --no-project --python 3.11 --with ruff ruff check hermes_cli/discord_interactions.py hermes_cli/plugin_capabilities.py hermes_cli/plugins.py tests/hermes_cli/test_discord_interactions.py
+All checks passed!
+```
+
+```text
+git diff --check
+(exit 0, no output)
+```
+
+The deferred Minor default-off direct registry test and the three controller-proven unrelated baseline ownership-ledger failures were not changed in this round.

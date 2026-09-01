@@ -148,6 +148,15 @@ def test_message_spec_rejects_invalid_schema_and_button_budget(mutate) -> None:
         validate_message_spec(spec)
 
 
+@pytest.mark.parametrize("style", [[], {}])
+def test_message_spec_rejects_non_string_button_style(style: object) -> None:
+    spec = valid_message_spec()
+    spec["components"][0]["style"] = style
+
+    with pytest.raises(ValueError, match="message spec"):
+        validate_message_spec(spec)
+
+
 def test_modal_spec_accepts_short_and_paragraph_budgets_without_mutation() -> None:
     short = valid_modal_spec()
     paragraph = valid_modal_spec("paragraph", 2_000)
@@ -180,6 +189,15 @@ def test_modal_spec_accepts_short_and_paragraph_budgets_without_mutation() -> No
 def test_modal_spec_rejects_invalid_schema_and_discord_budgets(mutate) -> None:
     spec = valid_modal_spec()
     mutate(spec)
+
+    with pytest.raises(ValueError, match="Modal spec"):
+        validate_modal_spec(spec)
+
+
+@pytest.mark.parametrize("style", [[], {}])
+def test_modal_spec_rejects_non_string_field_style(style: object) -> None:
+    spec = valid_modal_spec()
+    spec["fields"][0]["style"] = style
 
     with pytest.raises(ValueError, match="Modal spec"):
         validate_modal_spec(spec)
@@ -240,6 +258,12 @@ def test_interaction_result_rejects_unknown_keys_payloads_and_kinds(
 ) -> None:
     with pytest.raises(ValueError, match="interaction result"):
         validate_interaction_result(result, interaction_kind=interaction_kind)
+
+
+@pytest.mark.parametrize("kind", [[], {}])
+def test_interaction_result_rejects_non_string_kind(kind: object) -> None:
+    with pytest.raises(ValueError, match="interaction result"):
+        validate_interaction_result({"kind": kind}, interaction_kind="button")
 
 
 def test_discord_interactions_capability_is_registered() -> None:
