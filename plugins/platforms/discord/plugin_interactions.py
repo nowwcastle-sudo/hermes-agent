@@ -60,9 +60,15 @@ class DiscordPluginInteractionBridge:
         handler = get_plugin_manager().get_discord_interaction_handler(
             route["plugin_id"]
         )
-        if handler is None or not plugin_capability_granted(
-            route["plugin_id"], CAPABILITY_ID
-        ):
+        capability_granted = False
+        if handler is not None:
+            try:
+                capability_granted = plugin_capability_granted(
+                    route["plugin_id"], CAPABILITY_ID
+                )
+            except Exception:
+                capability_granted = False
+        if handler is None or not capability_granted:
             await self._ephemeral_once(interaction, "현재 사용할 수 없는 기능이야.")
             return True
         payload = self._normalize_interaction(interaction, route)

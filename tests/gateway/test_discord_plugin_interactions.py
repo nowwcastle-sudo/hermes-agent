@@ -12,12 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import PlatformConfig
+from gateway.config import Platform, PlatformConfig
 from hermes_cli.discord_interactions import (
     DiscordInteractions,
     decode_custom_id,
     encode_custom_id,
 )
+from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 from plugins.platforms.discord.adapter import DiscordAdapter
 import plugins.platforms.discord.adapter as discord_adapter_module
 from plugins.platforms.discord.plugin_interactions import (
@@ -124,6 +125,13 @@ def _allow_handler(monkeypatch, handler) -> None:
         "TextStyle",
         SimpleNamespace(short="short", paragraph="paragraph"),
         raising=False,
+    )
+
+
+def _plugin_context(manager: PluginManager) -> PluginContext:
+    return PluginContext(
+        PluginManifest(name="display-name", key="plugin-one", source="user"),
+        manager,
     )
 
 
@@ -311,6 +319,51 @@ async def test_reconnect_registers_once_on_each_new_client_without_double_dispat
 
 
 @pytest.mark.asyncio
+async def test_full_unload_reload_routes_listener_once_to_one_fresh_handler(
+    monkeypatch,
+) -> None:
+    manager = PluginManager()
+    handler_a = AsyncMock(return_value={"kind": "no_change"})
+    handler_b = AsyncMock(return_value={"kind": "no_change"})
+    monkeypatch.setattr("hermes_cli.plugins.plugin_capability_granted", lambda *_: True)
+    monkeypatch.setattr(plugin_interactions_module, "get_plugin_manager", lambda: manager)
+    monkeypatch.setattr(
+        plugin_interactions_module, "plugin_capability_granted", lambda *_: True
+    )
+    monkeypatch.setattr(plugin_interactions_module, "_component_check_auth", lambda *_: True)
+    registration_a = _plugin_context(manager).register_discord_interaction(handler_a)
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"slash_commands": False},
+        )
+    )
+    created = _prepare_listener_connect(monkeypatch, adapter)
+
+    assert await adapter.connect() is True
+    assert manager.unload() is True
+    assert registration_a.active is False
+    assert manager.get_discord_interaction_handler("plugin-one") is None
+    assert manager._discord_interaction_handlers == {}
+
+    registration_b = _plugin_context(manager).register_discord_interaction(handler_b)
+    assert manager._discord_interaction_handlers == {"plugin-one": handler_b}
+    assert len(created[0].listeners["on_interaction"]) == 1
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "open_form", "A" * 16)
+    )
+
+    await created[0].listeners["on_interaction"][0](interaction)
+
+    assert registration_b.active is True
+    handler_a.assert_not_awaited()
+    handler_b.assert_awaited_once()
+    interaction.response.send_message.assert_awaited_once()
+    interaction.response.defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_listener_contains_bridge_exception_with_one_trace_and_no_private_data(
     monkeypatch,
     caplog,
@@ -336,6 +389,7 @@ async def test_listener_contains_bridge_exception_with_one_trace_and_no_private_
     interaction = _fake_interaction(
         encode_custom_id("plugin-one", "submit", "A" * 16, private_markers[0])
     )
+    caplog.clear()
 
     await created[0].listeners["on_interaction"][0](interaction)
 
@@ -371,6 +425,7 @@ async def test_listener_contains_namespace_inspection_exception_with_one_trace(
             raise RuntimeError("PRIVATE_NAMESPACE_DATA")
 
     assert await adapter.connect() is True
+    caplog.clear()
 
     await created[0].listeners["on_interaction"][0](RaisingInteraction())
 
@@ -482,6 +537,141 @@ async def test_missing_or_revoked_handler_fails_closed_before_callback(
     interaction.response.send_message.assert_awaited_once()
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
     handler.assert_not_awaited()
+    interaction.response.defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "second_decision",
+    [False, OSError("PRIVATE_CONSENT_BACKEND")],
+    ids=["runtime-revoke", "consent-read-exception"],
+)
+async def test_existing_bridge_and_registration_fail_closed_after_runtime_revoke(
+    monkeypatch,
+    second_decision: object,
+) -> None:
+    manager = PluginManager()
+    handler = AsyncMock(return_value={"kind": "no_change"})
+    capability = {"decision": True}
+
+    def capability_granted(*_args) -> bool:
+        decision = capability["decision"]
+        if isinstance(decision, BaseException):
+            raise decision
+        return bool(decision)
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.plugin_capability_granted", capability_granted
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        capability_granted,
+    )
+    monkeypatch.setattr(plugin_interactions_module, "get_plugin_manager", lambda: manager)
+    monkeypatch.setattr(
+        plugin_interactions_module, "plugin_capability_granted", capability_granted
+    )
+    monkeypatch.setattr(plugin_interactions_module, "_component_check_auth", lambda *_: True)
+    ctx = _plugin_context(manager)
+    registration = ctx.register_discord_interaction(handler)
+    facade = ctx.discord
+    adapter = SimpleNamespace(
+        _allowed_user_ids={"202"},
+        _allowed_role_ids=set(),
+        is_connected=True,
+        plugin_interaction_send=AsyncMock(
+            return_value={
+                "ok": True,
+                "channel_id": "10",
+                "message_id": "20",
+                "error_code": "",
+            }
+        ),
+        plugin_interaction_update=AsyncMock(
+            return_value={"ok": True, "error_code": ""}
+        ),
+    )
+    monkeypatch.setattr(
+        "gateway.run._gateway_runner_ref",
+        lambda: SimpleNamespace(adapters={Platform.DISCORD: adapter}),
+    )
+    bridge = DiscordPluginInteractionBridge(adapter=adapter)
+    custom_id = encode_custom_id("plugin-one", "open_form", "A" * 16)
+    granted_interaction = _fake_interaction(custom_id)
+    rejected_interaction = _fake_interaction(custom_id)
+
+    assert await bridge.handle_interaction(granted_interaction) is True
+    assert await facade.send("10", _message_spec()) == {
+        "ok": True,
+        "channel_id": "10",
+        "message_id": "20",
+        "error_code": "",
+    }
+
+    capability["decision"] = second_decision
+    assert await bridge.handle_interaction(rejected_interaction) is True
+    send_result = await facade.send("10", _message_spec())
+    update_result = await facade.update("10", "20", _message_spec())
+
+    assert registration.active is True
+    assert ctx.discord is facade
+    assert manager.get_discord_interaction_handler("plugin-one") is handler
+    assert send_result == {"ok": False, "error_code": "capability_not_granted"}
+    assert update_result == {"ok": False, "error_code": "capability_not_granted"}
+    handler.assert_awaited_once()
+    adapter.plugin_interaction_send.assert_awaited_once()
+    adapter.plugin_interaction_update.assert_not_awaited()
+    granted_interaction.response.send_message.assert_awaited_once()
+    rejected_interaction.response.send_message.assert_awaited_once()
+    assert rejected_interaction.response.send_message.await_args.kwargs == {
+        "ephemeral": True
+    }
+    rejected_interaction.response.defer.assert_not_awaited()
+    rejected_interaction.response.send_modal.assert_not_awaited()
+    rejected_interaction.edit_original_response.assert_not_awaited()
+    rejected_interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_kind", ["dispose", "targeted_unload"])
+async def test_released_handler_identity_is_not_resurrected_after_reregistration(
+    monkeypatch,
+    release_kind: str,
+) -> None:
+    manager = PluginManager()
+    handler_a = AsyncMock(return_value={"kind": "no_change"})
+    handler_b = AsyncMock(return_value={"kind": "no_change"})
+    monkeypatch.setattr("hermes_cli.plugins.plugin_capability_granted", lambda *_: True)
+    monkeypatch.setattr(plugin_interactions_module, "get_plugin_manager", lambda: manager)
+    monkeypatch.setattr(
+        plugin_interactions_module, "plugin_capability_granted", lambda *_: True
+    )
+    monkeypatch.setattr(plugin_interactions_module, "_component_check_auth", lambda *_: True)
+    registration_a = _plugin_context(manager).register_discord_interaction(handler_a)
+
+    if release_kind == "dispose":
+        registration_a.dispose()
+    else:
+        assert manager.unload("plugin-one") is True
+
+    assert registration_a.active is False
+    assert manager.get_discord_interaction_handler("plugin-one") is None
+
+    registration_b = _plugin_context(manager).register_discord_interaction(handler_b)
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "open_form", "A" * 16)
+    )
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert registration_b.active is True
+    assert manager.get_discord_interaction_handler("plugin-one") is handler_b
+    handler_a.assert_not_awaited()
+    handler_b.assert_awaited_once()
+    interaction.response.send_message.assert_awaited_once()
     interaction.response.defer.assert_not_awaited()
 
 

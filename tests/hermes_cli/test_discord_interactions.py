@@ -232,6 +232,73 @@ async def test_update_revocation_fails_before_adapter(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "second_decision",
+    [False, OSError("PRIVATE_CONSENT_BACKEND")],
+    ids=["runtime-revoke", "consent-read-exception"],
+)
+async def test_existing_registration_and_facade_recheck_runtime_capability_before_adapter(
+    monkeypatch,
+    second_decision: object,
+) -> None:
+    manager = PluginManager()
+    ctx = _context(name="display-name", key="cs-quiz", manager=manager)
+    monkeypatch.setattr("hermes_cli.plugins.plugin_capability_granted", lambda *_: True)
+    registration = ctx.register_discord_interaction(
+        lambda _interaction: {"kind": "no_change"}
+    )
+    capability = {"decision": True}
+
+    def capability_granted(*_args) -> bool:
+        decision = capability["decision"]
+        if isinstance(decision, BaseException):
+            raise decision
+        return bool(decision)
+
+    adapter = SimpleNamespace(
+        is_connected=True,
+        plugin_interaction_send=AsyncMock(
+            return_value={
+                "ok": True,
+                "channel_id": "10",
+                "message_id": "20",
+                "error_code": "",
+            }
+        ),
+        plugin_interaction_update=AsyncMock(
+            return_value={"ok": True, "error_code": ""}
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        capability_granted,
+    )
+    monkeypatch.setattr(
+        "gateway.run._gateway_runner_ref",
+        lambda: SimpleNamespace(adapters={Platform.DISCORD: adapter}),
+    )
+    facade = ctx.discord
+
+    assert await facade.send("10", valid_message_spec()) == {
+        "ok": True,
+        "channel_id": "10",
+        "message_id": "20",
+        "error_code": "",
+    }
+
+    capability["decision"] = second_decision
+    send_result = await facade.send("10", valid_message_spec())
+    update_result = await facade.update("10", "20", valid_message_spec())
+
+    assert registration.active is True
+    assert ctx.discord is facade
+    assert send_result == {"ok": False, "error_code": "capability_not_granted"}
+    assert update_result == {"ok": False, "error_code": "capability_not_granted"}
+    adapter.plugin_interaction_send.assert_awaited_once()
+    adapter.plugin_interaction_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_send_consent_read_failure_is_fail_closed(monkeypatch) -> None:
     def fail_consent_read(*_args):
         raise OSError("sensitive consent backend detail")
