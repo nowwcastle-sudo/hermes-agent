@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from typing import Any
+import uuid
 
 import discord
 
@@ -18,6 +20,8 @@ from hermes_cli.discord_interactions import (
 from hermes_cli.plugin_capabilities import plugin_capability_granted
 from hermes_cli.plugins import get_plugin_manager
 from plugins.platforms.discord.adapter import _component_check_auth
+
+logger = logging.getLogger(__name__)
 
 _STYLE_MAP = {
     "primary": discord.ButtonStyle.primary,
@@ -77,18 +81,43 @@ class DiscordPluginInteractionBridge:
                 self._invoke_handler(handler, payload), timeout=timeout
             )
         except TimeoutError:
-            await self._handle_handler_timeout(
-                interaction, deferred=not is_modal_open
+            await self._safe_error(
+                interaction,
+                deferred=not is_modal_open,
+                operation="handler_timeout",
+                plugin_id=route["plugin_id"],
             )
             return True
-        if payload["kind"] == "modal_submit" and (
+        except Exception:
+            await self._safe_error(
+                interaction,
+                deferred=not is_modal_open,
+                operation="handler_exception",
+                plugin_id=route["plugin_id"],
+            )
+            return True
+        if not is_modal_open and (
             isinstance(result, dict) and result.get("kind") == "open_modal"
         ):
-            await interaction.followup.send("처리할 수 없는 응답이야.", ephemeral=True)
+            await self._safe_error(
+                interaction,
+                deferred=True,
+                operation="result_validation",
+                plugin_id=route["plugin_id"],
+            )
             return True
-        normalized = validate_interaction_result(
-            result, interaction_kind=payload["kind"]
-        )
+        try:
+            normalized = validate_interaction_result(
+                result, interaction_kind=payload["kind"]
+            )
+        except (TypeError, ValueError):
+            await self._safe_error(
+                interaction,
+                deferred=not is_modal_open,
+                operation="result_validation",
+                plugin_id=route["plugin_id"],
+            )
+            return True
         if is_modal_open:
             await self._apply_undeferred_result(interaction, route, normalized)
         else:
@@ -105,8 +134,21 @@ class DiscordPluginInteractionBridge:
         return result
 
     @staticmethod
-    async def _handle_handler_timeout(interaction: Any, *, deferred: bool) -> None:
-        content = "요청 처리 시간이 초과됐어."
+    async def _safe_error(
+        interaction: Any,
+        *,
+        deferred: bool,
+        operation: str,
+        plugin_id: str,
+    ) -> None:
+        trace_id = uuid.uuid4().hex
+        logger.error(
+            "discord_plugin_interaction_failed operation=%s plugin=%s trace=%s",
+            operation,
+            plugin_id,
+            trace_id,
+        )
+        content = f"요청을 처리하지 못했어. 추적 ID: {trace_id}"
         if deferred:
             await interaction.followup.send(content, ephemeral=True)
         else:
@@ -207,6 +249,10 @@ class DiscordPluginInteractionBridge:
                     route["plugin_id"], route["route_token"], result["modal"]
                 )
             )
+        elif result["kind"] == "ephemeral":
+            await self._ephemeral_once(interaction, result["content"])
+        elif result["kind"] == "no_change":
+            await self._ephemeral_once(interaction, "처리했어.")
 
     async def _apply_deferred_result(
         self,
@@ -218,6 +264,8 @@ class DiscordPluginInteractionBridge:
             await interaction.edit_original_response(
                 **self.build_message_kwargs(route["plugin_id"], result["message"])
             )
+        elif result["kind"] == "ephemeral":
+            await interaction.followup.send(result["content"], ephemeral=True)
 
     def build_message_kwargs(self, plugin_id: str, spec: dict) -> dict:
         """Build native Discord kwargs while keeping routing host-owned."""

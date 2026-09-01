@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -269,6 +270,59 @@ async def test_open_prefix_button_sends_modal_without_defer(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_undeferred_ephemeral_sends_one_initial_ephemeral_response(
+    monkeypatch,
+) -> None:
+    handler = AsyncMock(
+        return_value={"kind": "ephemeral", "content": "Visible only to you"}
+    )
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "open_form", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    handler.assert_awaited_once()
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        "Visible only to you", ephemeral=True
+    )
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_undeferred_no_change_sends_one_bounded_initial_ephemeral_ack(
+    monkeypatch,
+) -> None:
+    handler = AsyncMock(return_value={"kind": "no_change"})
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "open_form", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    handler.assert_awaited_once()
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    content = interaction.response.send_message.await_args.args[0]
+    assert 1 <= len(content) <= 200
+    assert interaction.response.send_message.await_args.kwargs == {"ephemeral": True}
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_modal_id_inherits_host_route_and_payload_keeps_component_value(
     monkeypatch,
 ) -> None:
@@ -337,6 +391,54 @@ async def test_non_open_button_defers_before_handler_then_updates(monkeypatch) -
     }
     interaction.response.send_message.assert_not_awaited()
     interaction.response.send_modal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deferred_ephemeral_sends_one_followup_without_second_initial_response(
+    monkeypatch,
+) -> None:
+    handler = AsyncMock(
+        return_value={"kind": "ephemeral", "content": "Deferred private reply"}
+    )
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    interaction.response.defer.assert_awaited_once_with()
+    handler.assert_awaited_once()
+    interaction.followup.send.assert_awaited_once_with(
+        "Deferred private reply", ephemeral=True
+    )
+    interaction.response.send_message.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deferred_no_change_uses_defer_as_sole_ack(monkeypatch) -> None:
+    handler = AsyncMock(return_value={"kind": "no_change"})
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    interaction.response.defer.assert_awaited_once_with()
+    handler.assert_awaited_once()
+    interaction.response.send_message.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -476,6 +578,7 @@ async def test_handler_wait_for_selects_open_and_deferred_timeout_constants(
 @pytest.mark.asyncio
 async def test_blocking_sync_open_handler_times_out_after_start_with_one_ack(
     monkeypatch,
+    caplog,
 ) -> None:
     release = threading.Event()
     events = []
@@ -491,7 +594,9 @@ async def test_blocking_sync_open_handler_times_out_after_start_with_one_ack(
         adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
     )
     interaction = _fake_interaction(
-        encode_custom_id("plugin-one", "open_form", "A" * 16)
+        encode_custom_id(
+            "plugin-one", "open_form", "R" * 24, "PRIVATE_COMPONENT_VALUE"
+        )
     )
     interaction.response.send_message.side_effect = (
         lambda *_args, **_kwargs: events.append("timeout_ack")
@@ -511,6 +616,16 @@ async def test_blocking_sync_open_handler_times_out_after_start_with_one_ack(
     interaction.response.defer.assert_not_awaited()
     interaction.response.send_message.assert_awaited_once()
     assert interaction.response.send_message.await_args.kwargs == {"ephemeral": True}
+    user_error = interaction.response.send_message.await_args.args[0]
+    trace_ids = re.findall(r"\b[0-9a-f]{32}\b", user_error)
+    assert len(trace_ids) == 1
+    assert caplog.messages == [
+        "discord_plugin_interaction_failed "
+        f"operation=handler_timeout plugin=plugin-one trace={trace_ids[0]}"
+    ]
+    exposed = f"{user_error}\n{caplog.text}"
+    assert "PRIVATE_COMPONENT_VALUE" not in exposed
+    assert "R" * 24 not in exposed
     interaction.response.send_modal.assert_not_awaited()
     interaction.followup.send.assert_not_awaited()
 
@@ -553,6 +668,111 @@ async def test_pending_async_deferred_handler_times_out_after_defer_with_one_err
     interaction.response.send_modal.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
     assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+    interaction.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deferred_handler_exception_uses_trace_safe_error_without_private_data(
+    monkeypatch,
+    caplog,
+) -> None:
+    private_exception = (
+        "PRIVATE_EXCEPTION PRIVATE_PROMPT PRIVATE_TOKEN PRIVATE_CREDENTIAL "
+        "PRIVATE_MESSAGE_SPEC"
+    )
+    handler_calls = []
+
+    async def handler(payload):
+        handler_calls.append(payload)
+        raise RuntimeError(private_exception)
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id(
+            "plugin-one", "submit_choice", "R" * 24, "PRIVATE_COMPONENT_VALUE"
+        )
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert len(handler_calls) == 1
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.response.send_message.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once()
+    assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+    user_error = interaction.followup.send.await_args.args[0]
+    trace_ids = re.findall(r"\b[0-9a-f]{32}\b", user_error)
+    assert len(trace_ids) == 1
+    assert caplog.messages == [
+        "discord_plugin_interaction_failed "
+        f"operation=handler_exception plugin=plugin-one trace={trace_ids[0]}"
+    ]
+    exposed = f"{user_error}\n{caplog.text}"
+    for private in (
+        private_exception,
+        "PRIVATE_COMPONENT_VALUE",
+        "R" * 24,
+    ):
+        assert private not in exposed
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"kind": "PRIVATE_RESULT_KIND"},
+        {
+            "kind": "ephemeral",
+            "content": "PRIVATE_RESULT_CONTENT",
+            "extra": "PRIVATE_RESULT_SCHEMA",
+        },
+        {"kind": "ephemeral", "content": {"PRIVATE_NON_JSON"}},
+    ],
+    ids=["invalid-kind", "invalid-schema", "non-json"],
+)
+async def test_invalid_handler_result_is_normalized_to_trace_safe_error(
+    monkeypatch,
+    caplog,
+    result,
+) -> None:
+    handler = AsyncMock(return_value=result)
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "R" * 24)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    handler.assert_awaited_once()
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.response.send_message.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once()
+    assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+    user_error = interaction.followup.send.await_args.args[0]
+    trace_ids = re.findall(r"\b[0-9a-f]{32}\b", user_error)
+    assert len(trace_ids) == 1
+    assert caplog.messages == [
+        "discord_plugin_interaction_failed "
+        f"operation=result_validation plugin=plugin-one trace={trace_ids[0]}"
+    ]
+    exposed = f"{user_error}\n{caplog.text}"
+    for private in (
+        "PRIVATE_RESULT_KIND",
+        "PRIVATE_RESULT_CONTENT",
+        "PRIVATE_RESULT_SCHEMA",
+        "PRIVATE_NON_JSON",
+        "R" * 24,
+    ):
+        assert private not in exposed
+    interaction.response.send_modal.assert_not_awaited()
     interaction.edit_original_response.assert_not_awaited()
 
 
@@ -687,8 +907,11 @@ async def test_button_and_modal_payloads_have_exact_json_v1_fields(monkeypatch) 
 @pytest.mark.asyncio
 async def test_deferred_modal_submit_rejects_open_modal_without_second_ack(
     monkeypatch,
+    caplog,
 ) -> None:
-    handler = AsyncMock(return_value=_modal_result())
+    result = _modal_result()
+    result["modal"]["title"] = "PRIVATE_MODAL_TITLE"
+    handler = AsyncMock(return_value=result)
     bridge = DiscordPluginInteractionBridge(
         adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
     )
@@ -709,6 +932,45 @@ async def test_deferred_modal_submit_rejects_open_modal_without_second_ack(
     kwargs = interaction.followup.send.await_args.kwargs
     assert 1 <= len(args[0]) <= 200
     assert kwargs == {"ephemeral": True}
+    trace_ids = re.findall(r"\b[0-9a-f]{32}\b", args[0])
+    assert len(trace_ids) == 1
+    assert caplog.messages == [
+        "discord_plugin_interaction_failed "
+        f"operation=result_validation plugin=plugin-one trace={trace_ids[0]}"
+    ]
+    assert "PRIVATE_MODAL_TITLE" not in f"{args[0]}\n{caplog.text}"
+
+
+@pytest.mark.asyncio
+async def test_deferred_button_rejects_open_modal_with_post_defer_safe_error(
+    monkeypatch,
+    caplog,
+) -> None:
+    handler = AsyncMock(return_value=_modal_result())
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    interaction.response.defer.assert_awaited_once_with()
+    handler.assert_awaited_once()
+    interaction.response.send_message.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once()
+    user_error = interaction.followup.send.await_args.args[0]
+    assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+    trace_ids = re.findall(r"\b[0-9a-f]{32}\b", user_error)
+    assert len(trace_ids) == 1
+    assert caplog.messages == [
+        "discord_plugin_interaction_failed "
+        f"operation=result_validation plugin=plugin-one trace={trace_ids[0]}"
+    ]
 
 
 @pytest.mark.asyncio
