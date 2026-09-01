@@ -215,6 +215,65 @@ def test_native_state_namespace_is_windows_safe_and_cannot_traverse(
         assert ctx.state.data_dir.name.upper() not in {"CON", "NUL", "COM1", "LPT1"}
 
 
+def test_state_compare_and_set_commits_only_matching_snapshot(
+    isolated_home: Path,
+) -> None:
+    state = _context().state
+    state.set("quiz", {"revision": 1, "value": "old"})
+
+    assert state.compare_and_set(
+        "quiz",
+        expected={"revision": 1, "value": "old"},
+        value={"revision": 2, "value": "new"},
+    ) is True
+    assert state.compare_and_set(
+        "quiz",
+        expected={"revision": 1, "value": "old"},
+        value={"revision": 3, "value": "lost"},
+    ) is False
+    assert state.get("quiz") == {"revision": 2, "value": "new"}
+
+
+def test_state_compare_and_set_can_claim_absent_key(isolated_home: Path) -> None:
+    state = _context().state
+    assert state.compare_and_set("quiz", expected=None, value={"revision": 1}) is True
+    assert state.get("quiz") == {"revision": 1}
+
+
+def test_state_compare_and_set_quota_failure_preserves_file(
+    isolated_home: Path,
+) -> None:
+    state = _context().state
+    state.set("quiz", {"revision": 1})
+    before = state.path.read_bytes()
+    with pytest.raises(ValueError, match="quota"):
+        state.compare_and_set(
+            "quiz", {"revision": 1}, "x" * (state.quota_bytes + 1)
+        )
+    assert state.path.read_bytes() == before
+
+
+def test_state_compare_and_set_refuses_corrupt_source(isolated_home: Path) -> None:
+    state = _context().state
+    state.data_dir.mkdir(parents=True)
+    state.path.write_text('{"quiz":', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Cannot parse plugin state"):
+        state.compare_and_set("quiz", None, {"revision": 1})
+    assert state.path.read_text(encoding="utf-8") == '{"quiz":'
+
+
+def test_state_backup_is_exact_previous_good_generation(isolated_home: Path) -> None:
+    state = _context().state
+    state.set("quiz", {"revision": 1})
+    state.set("quiz", {"revision": 2})
+    assert state.get_backup("quiz") == {"revision": 1}
+    state.set("quiz", {"revision": 3})
+    assert state.get_backup("quiz") == {"revision": 2}
+    assert [p.name for p in state.data_dir.glob("_백업_원본_state*.json")] == [
+        "_백업_원본_state.json"
+    ]
+
+
 def test_concurrent_state_updates_do_not_drop_keys(isolated_home: Path) -> None:
     ctx = _context()
 
@@ -228,6 +287,54 @@ def test_concurrent_state_updates_do_not_drop_keys(isolated_home: Path) -> None:
 
     state = json.loads(ctx.state.path.read_text(encoding="utf-8"))
     assert state == {f"cursor_{i}": i for i in range(40)}
+
+
+def test_state_compare_and_set_has_one_cross_process_winner(
+    isolated_home: Path,
+) -> None:
+    state = _context().state
+    state.set("quiz", {"revision": 1})
+    barrier = isolated_home / "cas-barrier"
+    script = """
+import sys
+import time
+from pathlib import Path
+from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+ctx = PluginContext(PluginManifest(name='fixture-plugin'), PluginManager())
+barrier = Path(sys.argv[1])
+while not barrier.exists():
+    time.sleep(0.01)
+winner = sys.argv[2]
+committed = ctx.state.compare_and_set(
+    'quiz',
+    {'revision': 1},
+    {'revision': 2, 'winner': winner},
+)
+print('1' if committed else '0')
+"""
+    env = dict(os.environ, HERMES_HOME=str(isolated_home))
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(barrier), winner],
+            cwd=Path(__file__).resolve().parents[2],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for winner in ("alpha", "beta")
+    ]
+    barrier.touch()
+    results = [process.communicate(timeout=30) for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0]
+    assert sorted(stdout.strip() for stdout, _ in results) == ["0", "1"]
+    assert all(stderr == "" for _, stderr in results)
+    assert state.get("quiz") in (
+        {"revision": 2, "winner": "alpha"},
+        {"revision": 2, "winner": "beta"},
+    )
+    assert state.get_backup("quiz") == {"revision": 1}
 
 
 def test_state_cross_process_lock_preserves_every_update(isolated_home: Path) -> None:

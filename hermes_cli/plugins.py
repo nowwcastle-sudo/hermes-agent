@@ -1368,26 +1368,69 @@ class PluginState:
         with _locked_plugin_state(self.path):
             return self._read_unlocked().get(key, default)
 
+    def get_backup(self, key: str, default: Any = None) -> Any:
+        """Read a value from the previous-good snapshot without changing state."""
+        self._validate_key(key)
+        backup_path = self.data_dir / "_백업_원본_state.json"
+        with _locked_plugin_state(self.path):
+            try:
+                with open(backup_path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except FileNotFoundError:
+                return default
+            except (OSError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Cannot parse plugin state backup {backup_path}: {exc}"
+                ) from exc
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    f"Cannot parse plugin state backup {backup_path}: "
+                    "root must be an object"
+                )
+            return data.get(key, default)
+
+    def _write_unlocked(
+        self,
+        previous: dict[str, Any],
+        data: dict[str, Any],
+    ) -> None:
+        try:
+            encoded = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Plugin state is not JSON-serializable") from exc
+        if len(encoded) > self.quota_bytes:
+            raise ValueError(
+                f"Plugin state quota exceeded: {len(encoded)} bytes is greater "
+                f"than the {self.quota_bytes}-byte per-plugin quota"
+            )
+        from utils import atomic_json_write
+
+        if self.path.exists():
+            atomic_json_write(
+                self.data_dir / "_백업_원본_state.json", previous, mode=0o600
+            )
+        atomic_json_write(self.path, data, mode=0o600)
+
     def set(self, key: str, value: Any) -> None:
         """Atomically set one JSON value without dropping concurrent updates."""
         self._validate_key(key)
         with _locked_plugin_state(self.path):
             data = self._read_unlocked()
+            previous = dict(data)
             data[key] = value
-            try:
-                encoded = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Plugin state value for {key!r} is not JSON-serializable"
-                ) from exc
-            if len(encoded) > self.quota_bytes:
-                raise ValueError(
-                    f"Plugin state quota exceeded: {len(encoded)} bytes is greater "
-                    f"than the {self.quota_bytes}-byte per-plugin quota"
-                )
-            from utils import atomic_json_write
+            self._write_unlocked(previous, data)
 
-            atomic_json_write(self.path, data, mode=0o600)
+    def compare_and_set(self, key: str, expected: Any, value: Any) -> bool:
+        """Set one JSON value only when its current snapshot matches *expected*."""
+        self._validate_key(key)
+        with _locked_plugin_state(self.path):
+            data = self._read_unlocked()
+            if data.get(key) != expected:
+                return False
+            next_data = dict(data)
+            next_data[key] = value
+            self._write_unlocked(data, next_data)
+            return True
 
 
 class PluginContext:
