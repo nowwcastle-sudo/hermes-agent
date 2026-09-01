@@ -1385,6 +1385,20 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             adapter_self = self  # capture for closure
 
+            async def on_plugin_interaction(interaction):
+                data = getattr(interaction, "data", None) or {}
+                if not str(data.get("custom_id", "")).startswith("hdi1."):
+                    return
+                try:
+                    await adapter_self._plugin_interactions.handle_interaction(interaction)
+                except Exception:
+                    logger.error(
+                        "discord_plugin_interaction_listener_failed trace=%s",
+                        uuid.uuid4().hex,
+                    )
+
+            self._client.add_listener(on_plugin_interaction, "on_interaction")
+
             # Register event handlers
             @self._client.event
             async def on_ready():

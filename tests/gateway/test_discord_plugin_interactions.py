@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 import json
 import re
 import threading
@@ -145,6 +146,208 @@ def _modal_result(action: str = "submit_answer") -> dict:
             ],
         },
     }
+
+
+class _ListenerBot:
+    def __init__(self, **_kwargs):
+        self.user = SimpleNamespace(id=999, name="Hermes")
+        self.guilds = []
+        self._closed = False
+        self.events = {}
+        self.listeners = defaultdict(list)
+
+    def event(self, callback):
+        self.events[callback.__name__] = callback
+        return callback
+
+    def add_listener(self, callback, name):
+        self.listeners[name].append(callback)
+
+    async def start(self, _token):
+        await self.events["on_ready"]()
+
+    async def close(self):
+        self._closed = True
+
+    def is_closed(self):
+        return self._closed
+
+
+def _prepare_listener_connect(monkeypatch, adapter):
+    created = []
+
+    def make_bot(**kwargs):
+        bot = _ListenerBot(**kwargs)
+        created.append(bot)
+        return bot
+
+    intents = SimpleNamespace(
+        message_content=False,
+        dm_messages=False,
+        guild_messages=False,
+        members=False,
+        voice_states=False,
+    )
+    monkeypatch.setattr(
+        "gateway.status.acquire_scoped_lock", lambda *_args, **_kwargs: (True, None)
+    )
+    monkeypatch.setattr("gateway.status.release_scoped_lock", lambda *_args: None)
+    monkeypatch.setattr(discord_adapter_module.Intents, "default", lambda: intents)
+    monkeypatch.setattr(discord_adapter_module.commands, "Bot", make_bot)
+    monkeypatch.setattr(adapter, "_resolve_allowed_usernames", AsyncMock())
+    monkeypatch.setattr(adapter, "_run_post_connect_initialization", AsyncMock())
+    monkeypatch.setattr(adapter, "_start_liveness_probe", MagicMock())
+    monkeypatch.setattr(adapter, "_handle_bot_task_done", MagicMock())
+    return created
+
+
+@pytest.mark.asyncio
+async def test_connect_registers_exactly_one_interaction_listener_with_add_listener(
+    monkeypatch,
+) -> None:
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"slash_commands": False},
+        )
+    )
+    created = _prepare_listener_connect(monkeypatch, adapter)
+
+    assert await adapter.connect() is True
+
+    assert len(created) == 1
+    assert list(created[0].listeners) == ["on_interaction"]
+    assert len(created[0].listeners["on_interaction"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_owned_interaction_coexists_with_existing_view_callback(
+    monkeypatch,
+) -> None:
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"slash_commands": False},
+        )
+    )
+    created = _prepare_listener_connect(monkeypatch, adapter)
+    adapter._plugin_interactions.handle_interaction = AsyncMock()
+    existing_view_callback = AsyncMock()
+
+    assert await adapter.connect() is True
+    interaction = _fake_interaction("clarify.choice")
+    listener = created[0].listeners["on_interaction"][0]
+
+    await listener(interaction)
+    await existing_view_callback(interaction)
+
+    adapter._plugin_interactions.handle_interaction.assert_not_awaited()
+    existing_view_callback.assert_awaited_once_with(interaction)
+    interaction.response.send_message.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.response.defer.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["button", "modal_submit"])
+async def test_owned_button_and_modal_reach_bridge_exactly_once(
+    monkeypatch,
+    kind,
+) -> None:
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"slash_commands": False},
+        )
+    )
+    created = _prepare_listener_connect(monkeypatch, adapter)
+    adapter._plugin_interactions.handle_interaction = AsyncMock(return_value=True)
+
+    assert await adapter.connect() is True
+    custom_id = encode_custom_id("plugin-one", "submit", "A" * 16)
+    interaction = (
+        _fake_interaction(custom_id)
+        if kind == "button"
+        else _fake_modal_submit(custom_id, [])
+    )
+
+    await created[0].listeners["on_interaction"][0](interaction)
+
+    adapter._plugin_interactions.handle_interaction.assert_awaited_once_with(interaction)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_registers_once_on_each_new_client_without_double_dispatch(
+    monkeypatch,
+) -> None:
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"slash_commands": False},
+        )
+    )
+    created = _prepare_listener_connect(monkeypatch, adapter)
+    adapter._plugin_interactions.handle_interaction = AsyncMock(return_value=True)
+
+    assert await adapter.connect() is True
+    assert await adapter.connect(is_reconnect=True) is True
+
+    assert len(created) == 2
+    assert created[0].is_closed() is True
+    assert [len(bot.listeners["on_interaction"]) for bot in created] == [1, 1]
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit", "A" * 16)
+    )
+
+    await created[1].listeners["on_interaction"][0](interaction)
+
+    adapter._plugin_interactions.handle_interaction.assert_awaited_once_with(interaction)
+
+
+@pytest.mark.asyncio
+async def test_listener_contains_bridge_exception_with_one_trace_and_no_private_data(
+    monkeypatch,
+    caplog,
+) -> None:
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"slash_commands": False},
+        )
+    )
+    created = _prepare_listener_connect(monkeypatch, adapter)
+    private_markers = [
+        "PRIVATE_COMPONENT_VALUE",
+        "PRIVATE_ROUTE_TOKEN",
+        "PRIVATE_USER_DATA",
+        "PRIVATE_CREDENTIAL",
+    ]
+    adapter._plugin_interactions.handle_interaction = AsyncMock(
+        side_effect=RuntimeError(" ".join(private_markers))
+    )
+    assert await adapter.connect() is True
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit", "A" * 16, private_markers[0])
+    )
+
+    await created[0].listeners["on_interaction"][0](interaction)
+
+    adapter._plugin_interactions.handle_interaction.assert_awaited_once_with(interaction)
+    assert len(caplog.messages) == 1
+    trace_ids = re.findall(r"\b[0-9a-f]{32}\b", caplog.messages[0])
+    assert len(trace_ids) == 1
+    assert caplog.messages == [
+        f"discord_plugin_interaction_listener_failed trace={trace_ids[0]}"
+    ]
+    for marker in private_markers:
+        assert marker not in caplog.text
 
 
 @pytest.mark.asyncio
