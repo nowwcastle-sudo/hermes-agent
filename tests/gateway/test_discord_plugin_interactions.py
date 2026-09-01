@@ -160,6 +160,8 @@ class _ListenerBot:
     def __init__(self, **_kwargs):
         self.user = SimpleNamespace(id=999, name="Hermes")
         self.guilds = []
+        self.cached_messages = []
+        self.persistent_views = []
         self._closed = False
         self.events = {}
         self.listeners = defaultdict(list)
@@ -304,18 +306,25 @@ async def test_reconnect_registers_once_on_each_new_client_without_double_dispat
     adapter._plugin_interactions.handle_interaction = AsyncMock(return_value=True)
 
     assert await adapter.connect() is True
+    first_interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit", "A" * 16)
+    )
+    await created[0].listeners["on_interaction"][0](first_interaction)
     assert await adapter.connect(is_reconnect=True) is True
 
     assert len(created) == 2
     assert created[0].is_closed() is True
     assert [len(bot.listeners["on_interaction"]) for bot in created] == [1, 1]
-    interaction = _fake_interaction(
+    second_interaction = _fake_interaction(
         encode_custom_id("plugin-one", "submit", "A" * 16)
     )
 
-    await created[1].listeners["on_interaction"][0](interaction)
+    await created[1].listeners["on_interaction"][0](second_interaction)
 
-    adapter._plugin_interactions.handle_interaction.assert_awaited_once_with(interaction)
+    assert adapter._plugin_interactions.handle_interaction.await_args_list == [
+        ((first_interaction,), {}),
+        ((second_interaction,), {}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -361,6 +370,52 @@ async def test_full_unload_reload_routes_listener_once_to_one_fresh_handler(
     handler_b.assert_awaited_once()
     interaction.response.send_message.assert_awaited_once()
     interaction.response.defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stable_custom_id_routes_with_fresh_bridge_client_and_empty_cache(
+    monkeypatch,
+) -> None:
+    manager = PluginManager()
+    handler = AsyncMock(return_value={"kind": "no_change"})
+    monkeypatch.setattr("hermes_cli.plugins.plugin_capability_granted", lambda *_: True)
+    monkeypatch.setattr(plugin_interactions_module, "get_plugin_manager", lambda: manager)
+    monkeypatch.setattr(
+        plugin_interactions_module, "plugin_capability_granted", lambda *_: True
+    )
+    monkeypatch.setattr(plugin_interactions_module, "_component_check_auth", lambda *_: True)
+    registration = _plugin_context(manager).register_discord_interaction(handler)
+    original_bridge = DiscordPluginInteractionBridge(adapter=None)
+    stable_custom_id = original_bridge.build_message_kwargs(
+        "plugin-one", _message_spec()
+    )["view"].children[0].custom_id
+
+    fresh_adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"slash_commands": False},
+        )
+    )
+    created = _prepare_listener_connect(monkeypatch, fresh_adapter)
+
+    assert await fresh_adapter.connect() is True
+    assert fresh_adapter._plugin_interactions is not original_bridge
+    assert len(created) == 1
+    assert created[0].cached_messages == []
+    assert created[0].persistent_views == []
+    interaction = _fake_interaction(stable_custom_id)
+
+    await created[0].listeners["on_interaction"][0](interaction)
+
+    assert registration.active is True
+    assert manager.get_discord_interaction_handler("plugin-one") is handler
+    handler.assert_awaited_once()
+    payload = handler.await_args.args[0]
+    assert payload["plugin_id"] == "plugin-one"
+    assert payload["route_token"] == "A" * 24
+    assert payload["component_value"] == "choice-a"
+    interaction.response.defer.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -469,6 +524,83 @@ async def test_owned_malformed_custom_id_gets_one_bounded_ephemeral_ack() -> Non
     assert 1 <= len(interaction.response.send_message.await_args.args[0]) <= 200
     interaction.response.defer.assert_not_awaited()
     interaction.response.send_modal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_canonical_plugin_id_uses_missing_handler_fail_closed_path(
+    monkeypatch,
+) -> None:
+    known_handler = AsyncMock(return_value={"kind": "no_change"})
+    manager = SimpleNamespace(
+        get_discord_interaction_handler=MagicMock(
+            side_effect=lambda plugin_id: (
+                known_handler if plugin_id == "plugin-one" else None
+            )
+        )
+    )
+    capability_granted = MagicMock(return_value=True)
+    monkeypatch.setattr(plugin_interactions_module, "get_plugin_manager", lambda: manager)
+    monkeypatch.setattr(
+        plugin_interactions_module, "plugin_capability_granted", capability_granted
+    )
+    monkeypatch.setattr(plugin_interactions_module, "_component_check_auth", lambda *_: True)
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("unknown-plugin", "submit_choice", "A" * 16)
+    )
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    manager.get_discord_interaction_handler.assert_called_once_with("unknown-plugin")
+    capability_granted.assert_not_called()
+    known_handler.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        "현재 사용할 수 없는 기능이야.", ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "custom_id",
+    [
+        "hdi1.Y3MtcXVpeg==.submit_choice." + "A" * 16,
+        "hdi1.Y3MtcXVpeg.SubmitChoice." + "A" * 16,
+        "hdi1.Y3MtcXVpeg.submit_choice.short",
+        "hdi1.Y3MtcXVpeg.submit_choice." + "A" * 16 + ".YQ==",
+    ],
+    ids=[
+        "noncanonical-plugin-segment",
+        "noncanonical-action",
+        "malformed-route-token",
+        "noncanonical-component-value",
+    ],
+)
+async def test_malformed_or_noncanonical_custom_id_fails_before_routing(
+    monkeypatch,
+    custom_id: str,
+) -> None:
+    auth = MagicMock(return_value=True)
+    get_manager = MagicMock()
+    monkeypatch.setattr(plugin_interactions_module, "_component_check_auth", auth)
+    monkeypatch.setattr(plugin_interactions_module, "get_plugin_manager", get_manager)
+    bridge = DiscordPluginInteractionBridge(adapter=SimpleNamespace())
+    interaction = _fake_interaction(custom_id)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    auth.assert_not_called()
+    get_manager.assert_not_called()
+    interaction.response.send_message.assert_awaited_once_with(
+        "유효하지 않은 요청이야.", ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -673,6 +805,115 @@ async def test_released_handler_identity_is_not_resurrected_after_reregistration
     handler_b.assert_awaited_once()
     interaction.response.send_message.assert_awaited_once()
     interaction.response.defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutated_field", "mutated_value"),
+    [
+        ("route_token", "B" * 16),
+        ("channel_id", "999"),
+        ("message_id", "888"),
+    ],
+)
+async def test_generic_fixture_rejects_each_stale_route_channel_or_message(
+    monkeypatch,
+    mutated_field: str,
+    mutated_value: str,
+) -> None:
+    expected = {
+        "route_token": "A" * 16,
+        "channel_id": "404",
+        "message_id": "505",
+    }
+    calls = []
+
+    async def handler(payload):
+        calls.append(payload)
+        actual = {key: payload[key] for key in expected}
+        if actual != expected:
+            return {"kind": "ephemeral", "content": "stale interaction"}
+        return {"kind": "no_change"}
+
+    custom_id = encode_custom_id(
+        "plugin-one",
+        "submit_choice",
+        mutated_value if mutated_field == "route_token" else expected["route_token"],
+    )
+    interaction = _fake_interaction(custom_id)
+    if mutated_field in {"channel_id", "message_id"}:
+        if mutated_field == "channel_id":
+            interaction.channel_id = int(mutated_value)
+        else:
+            interaction.message.id = int(mutated_value)
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert len(calls) == 1
+    actual = {key: calls[0][key] for key in expected}
+    assert actual == {**expected, mutated_field: mutated_value}
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.followup.send.assert_awaited_once_with(
+        "stale interaction", ephemeral=True
+    )
+    interaction.response.send_message.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_component_value_mutation_preserves_route_and_changes_exact_payload(
+    monkeypatch,
+) -> None:
+    payloads = []
+
+    async def handler(payload):
+        payloads.append(payload)
+        if payload.get("component_value") != "choice-a":
+            return {"kind": "ephemeral", "content": "stale component"}
+        return {"kind": "no_change"}
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    _allow_handler(monkeypatch, handler)
+    accepted = _fake_interaction(
+        encode_custom_id(
+            "plugin-one", "submit_choice", "A" * 16, component_value="choice-a"
+        )
+    )
+    mutated = _fake_interaction(
+        encode_custom_id(
+            "plugin-one", "submit_choice", "A" * 16, component_value="choice-b"
+        )
+    )
+
+    assert await bridge.handle_interaction(accepted) is True
+    assert await bridge.handle_interaction(mutated) is True
+
+    assert [
+        (
+            payload["plugin_id"],
+            payload["action"],
+            payload["route_token"],
+            payload["component_value"],
+        )
+        for payload in payloads
+    ] == [
+        ("plugin-one", "submit_choice", "A" * 16, "choice-a"),
+        ("plugin-one", "submit_choice", "A" * 16, "choice-b"),
+    ]
+    accepted.response.defer.assert_awaited_once_with()
+    accepted.followup.send.assert_not_awaited()
+    mutated.response.defer.assert_awaited_once_with()
+    mutated.followup.send.assert_awaited_once_with("stale component", ephemeral=True)
+    for interaction in (accepted, mutated):
+        interaction.response.send_message.assert_not_awaited()
+        interaction.response.send_modal.assert_not_awaited()
+        interaction.edit_original_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
