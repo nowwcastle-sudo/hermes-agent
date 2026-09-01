@@ -240,17 +240,40 @@ def test_state_compare_and_set_can_claim_absent_key(isolated_home: Path) -> None
     assert state.get("quiz") == {"revision": 1}
 
 
-def test_state_compare_and_set_quota_failure_preserves_file(
+def test_state_compare_and_set_quota_failure_preserves_primary_and_backup(
     isolated_home: Path,
 ) -> None:
     state = _context().state
     state.set("quiz", {"revision": 1})
-    before = state.path.read_bytes()
+    state.set("quiz", {"revision": 2})
+    backup_path = state.data_dir / "_백업_원본_state.json"
+    primary_before = state.path.read_bytes()
+    backup_before = backup_path.read_bytes()
+
     with pytest.raises(ValueError, match="quota"):
         state.compare_and_set(
-            "quiz", {"revision": 1}, "x" * (state.quota_bytes + 1)
+            "quiz", {"revision": 2}, "x" * (state.quota_bytes + 1)
         )
-    assert state.path.read_bytes() == before
+
+    assert state.path.read_bytes() == primary_before
+    assert backup_path.read_bytes() == backup_before
+
+
+def test_state_compare_and_set_serialization_failure_preserves_primary_and_backup(
+    isolated_home: Path,
+) -> None:
+    state = _context().state
+    state.set("quiz", {"revision": 1})
+    state.set("quiz", {"revision": 2})
+    backup_path = state.data_dir / "_백업_원본_state.json"
+    primary_before = state.path.read_bytes()
+    backup_before = backup_path.read_bytes()
+
+    with pytest.raises(ValueError, match="JSON-serializable"):
+        state.compare_and_set("quiz", {"revision": 2}, object())
+
+    assert state.path.read_bytes() == primary_before
+    assert backup_path.read_bytes() == backup_before
 
 
 def test_state_compare_and_set_refuses_corrupt_source(isolated_home: Path) -> None:
