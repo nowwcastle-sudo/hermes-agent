@@ -173,3 +173,40 @@ paths:
 ```
 
 The staged `git diff --check` exited 0 with no output. After commit, the same range is one Task 6B commit and the worktree cleanliness check is reported in the caller-visible completion summary.
+
+## Important-gap fix round 1 evidence
+
+Reviewed head/base for this tests-only follow-up: `a8cd305f4507d641b1f0788a0a90efb0c7a46efc`.
+
+The two requested Important gaps were closed without production changes:
+
+- The owned malformed, unknown canonical plugin, and malformed/noncanonical custom-ID cases now assert every applicable unused ACK/output surface, including `edit_original_response`; the owned malformed case also explicitly rejects follow-up output.
+- Every stale route/channel/message parameter case now asserts that `response.send_modal` is not awaited in addition to the already asserted defer, follow-up, initial-response, and original-response behavior.
+- The component-value mutation comparison now asserts the exact `(plugin_id, action, route_token, component_value, user_id, channel_id, message_id)` tuple for both accepted and mutated payloads against explicit expected values.
+
+Fresh focused amended-test result:
+
+```text
+10 passed, 54 deselected in 0.99s
+```
+
+Fresh complete seven-file Task 6B gate:
+
+```text
+297 passed in 103.39s (0:01:43)
+```
+
+The three unchanged baseline files were first proven byte-unchanged from reviewed head `a8cd305f4507d641b1f0788a0a90efb0c7a46efc`, then run independently and counted from JUnit XML:
+
+```text
+41 passed in 6.82s
+baseline_tests=41 baseline_passed=41 failures=0 errors=0 skipped=0
+```
+
+Ruff rechecked the same four approved production modules and two interaction test modules listed above:
+
+```text
+All checks passed!
+```
+
+Before this report append, `git diff --check` exited 0 and the only changed path was `tests/gateway/test_discord_plugin_interactions.py` (`26` insertions, `2` deletions). Final staging contained exactly the approved test and this report, with `63` insertions and `2` deletions; both cached and uncached diff checks were clean. Local `detect-secrets` was unavailable as anticipated by the deferred reviewer-environment Minor, so a no-value staged-added-line credential-pattern fallback scanned those exact two paths and reported `fallback_staged_credential_pattern_matches=0`.

@@ -524,6 +524,8 @@ async def test_owned_malformed_custom_id_gets_one_bounded_ephemeral_ack() -> Non
     assert 1 <= len(interaction.response.send_message.await_args.args[0]) <= 200
     interaction.response.defer.assert_not_awaited()
     interaction.response.send_modal.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -561,6 +563,7 @@ async def test_unknown_canonical_plugin_id_uses_missing_handler_fail_closed_path
     )
     interaction.response.defer.assert_not_awaited()
     interaction.response.send_modal.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
     interaction.followup.send.assert_not_awaited()
 
 
@@ -600,6 +603,7 @@ async def test_malformed_or_noncanonical_custom_id_fails_before_routing(
     )
     interaction.response.defer.assert_not_awaited()
     interaction.response.send_modal.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
     interaction.followup.send.assert_not_awaited()
 
 
@@ -861,6 +865,7 @@ async def test_generic_fixture_rejects_each_stale_route_channel_or_message(
         "stale interaction", ephemeral=True
     )
     interaction.response.send_message.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
     interaction.edit_original_response.assert_not_awaited()
 
 
@@ -900,11 +905,30 @@ async def test_component_value_mutation_preserves_route_and_changes_exact_payloa
             payload["action"],
             payload["route_token"],
             payload["component_value"],
+            payload["user_id"],
+            payload["channel_id"],
+            payload["message_id"],
         )
         for payload in payloads
     ] == [
-        ("plugin-one", "submit_choice", "A" * 16, "choice-a"),
-        ("plugin-one", "submit_choice", "A" * 16, "choice-b"),
+        (
+            "plugin-one",
+            "submit_choice",
+            "A" * 16,
+            "choice-a",
+            "202",
+            "404",
+            "505",
+        ),
+        (
+            "plugin-one",
+            "submit_choice",
+            "A" * 16,
+            "choice-b",
+            "202",
+            "404",
+            "505",
+        ),
     ]
     accepted.response.defer.assert_awaited_once_with()
     accepted.followup.send.assert_not_awaited()
