@@ -391,6 +391,7 @@ async def test_non_open_button_defers_before_handler_then_updates(monkeypatch) -
     }
     interaction.response.send_message.assert_not_awaited()
     interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -676,10 +677,14 @@ async def test_deferred_handler_exception_uses_trace_safe_error_without_private_
     monkeypatch,
     caplog,
 ) -> None:
-    private_exception = (
-        "PRIVATE_EXCEPTION PRIVATE_PROMPT PRIVATE_TOKEN PRIVATE_CREDENTIAL "
-        "PRIVATE_MESSAGE_SPEC"
+    private_exception_markers = (
+        "PRIVATE_EXCEPTION",
+        "PRIVATE_PROMPT",
+        "PRIVATE_TOKEN",
+        "PRIVATE_CREDENTIAL",
+        "PRIVATE_MESSAGE_SPEC",
     )
+    private_exception = " ".join(private_exception_markers)
     handler_calls = []
 
     async def handler(payload):
@@ -710,13 +715,13 @@ async def test_deferred_handler_exception_uses_trace_safe_error_without_private_
         "discord_plugin_interaction_failed "
         f"operation=handler_exception plugin=plugin-one trace={trace_ids[0]}"
     ]
-    exposed = f"{user_error}\n{caplog.text}"
     for private in (
-        private_exception,
+        *private_exception_markers,
         "PRIVATE_COMPONENT_VALUE",
         "R" * 24,
     ):
-        assert private not in exposed
+        assert private not in user_error
+        assert private not in caplog.text
     interaction.response.send_modal.assert_not_awaited()
     interaction.edit_original_response.assert_not_awaited()
 
@@ -938,7 +943,8 @@ async def test_deferred_modal_submit_rejects_open_modal_without_second_ack(
         "discord_plugin_interaction_failed "
         f"operation=result_validation plugin=plugin-one trace={trace_ids[0]}"
     ]
-    assert "PRIVATE_MODAL_TITLE" not in f"{args[0]}\n{caplog.text}"
+    assert "PRIVATE_MODAL_TITLE" not in args[0]
+    assert "PRIVATE_MODAL_TITLE" not in caplog.text
 
 
 @pytest.mark.asyncio

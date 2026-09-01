@@ -109,3 +109,77 @@ paths:
 ## Concerns
 
 - The documented 5A-2b1 limitation remains: timing out an `asyncio.to_thread` handler stops host awaiting/response latency but cannot terminate an already-running worker or roll back side effects. This takeover does not broaden scope to change that behavior.
+
+## Fix Round 1/5 — Important test gaps
+
+### Status
+
+**DONE**
+
+Only the two requested test gaps were amended. Production code is unchanged from reviewed head `8882940302103bcbb81af18943ad206610bc36aa`.
+
+### Test amendments
+
+- The deferred handler-exception redaction test now asserts each exception-text, prompt, token, credential, message-spec, component-value, and route-token marker independently against both the user response and captured logs.
+- The deferred modal rejection test now asserts its modal-title marker independently against both the user response and captured logs.
+- The deferred `update_message` exact-no-extra test now asserts `interaction.followup.send.assert_not_awaited()`.
+
+### Focused amended tests
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/gateway/test_discord_plugin_interactions.py::test_non_open_button_defers_before_handler_then_updates tests/gateway/test_discord_plugin_interactions.py::test_deferred_handler_exception_uses_trace_safe_error_without_private_data tests/gateway/test_discord_plugin_interactions.py::test_deferred_modal_submit_rejects_open_modal_without_second_ack
+3 passed in 1.09s
+```
+
+### Entire gateway bridge suite
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/gateway/test_discord_plugin_interactions.py
+42 passed in 18.12s
+```
+
+### Tasks 2–4 contracts and auth/clarify/platform regressions
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/hermes_cli/test_plugin_capabilities.py tests/hermes_cli/test_discord_interactions.py tests/gateway/test_discord_send.py tests/gateway/test_discord_clarify_buttons.py tests/gateway/test_discord_component_auth.py tests/gateway/test_discord_platform_events.py
+214 passed in 78.77s (0:01:18)
+```
+
+### Ruff
+
+```text
+uv run --no-project --python 3.11 --with ruff ruff check tests/gateway/test_discord_plugin_interactions.py
+All checks passed!
+```
+
+### Diff and scope checks
+
+```text
+git diff --check
+exit 0, no output
+
+git diff --name-only
+tests/gateway/test_discord_plugin_interactions.py
+
+git diff 8882940302103bcbb81af18943ad206610bc36aa -- plugins/platforms/discord/plugin_interactions.py
+exit 0, no output
+```
+
+### Staged scope and credential scan
+
+```text
+git diff --cached --name-only
+.superpowers/sdd/2026-09-01-discord-interactions-core/task-5a2b2-report.md
+tests/gateway/test_discord_plugin_interactions.py
+
+uv run --no-project --python 3.11 --with detect-secrets detect-secrets scan <the two staged paths>
+matches=0
+paths:
+```
+
+`detect-secrets` JSON was reduced to count and matching paths only; no matching lines or values were printed.
+
+### Fix Round 1 concerns
+
+- The deferred timeout trace/log correlation test remains the explicitly deferred Minor and was not addressed.
+- The documented 5A-2b1 `asyncio.to_thread` timeout limitation remains unchanged.
