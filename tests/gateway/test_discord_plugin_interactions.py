@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,6 +21,7 @@ import plugins.platforms.discord.adapter as discord_adapter_module
 from plugins.platforms.discord.plugin_interactions import (
     DiscordPluginInteractionBridge,
 )
+import plugins.platforms.discord.plugin_interactions as plugin_interactions_module
 
 
 def _message_spec() -> dict:
@@ -334,6 +337,223 @@ async def test_non_open_button_defers_before_handler_then_updates(monkeypatch) -
     }
     interaction.response.send_message.assert_not_awaited()
     interaction.response.send_modal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_handler_runs_in_thread_and_is_invoked_once(monkeypatch) -> None:
+    calls = []
+    to_thread_calls = []
+    real_to_thread = asyncio.to_thread
+
+    def handler(payload):
+        calls.append(payload)
+        return {"kind": "no_change"}
+
+    async def recording_to_thread(func, *args):
+        to_thread_calls.append((func, args))
+        return await real_to_thread(func, *args)
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+    monkeypatch.setattr(plugin_interactions_module.asyncio, "to_thread", recording_to_thread)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "submit_choice"
+    assert to_thread_calls == [(handler, (calls[0],))]
+    interaction.response.defer.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_coroutine_handler_is_awaited_directly_and_invoked_once(monkeypatch) -> None:
+    calls = []
+
+    async def handler(payload):
+        calls.append(payload)
+        return {"kind": "no_change"}
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+    to_thread = AsyncMock()
+    monkeypatch.setattr(plugin_interactions_module.asyncio, "to_thread", to_thread)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "submit_choice"
+    to_thread.assert_not_awaited()
+    interaction.response.defer.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_sync_handler_returned_awaitable_is_awaited_without_reinvocation(
+    monkeypatch,
+) -> None:
+    handler_calls = []
+    await_calls = []
+
+    async def finish():
+        await_calls.append("awaited")
+        return {"kind": "no_change"}
+
+    def handler(payload):
+        handler_calls.append(payload)
+        return finish()
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert len(handler_calls) == 1
+    assert await_calls == ["awaited"]
+    interaction.response.defer.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "expected_timeout", "result"),
+    [
+        ("open_form", 0.011, _modal_result()),
+        ("submit_choice", 0.022, {"kind": "no_change"}),
+    ],
+)
+async def test_handler_wait_for_selects_open_and_deferred_timeout_constants(
+    monkeypatch,
+    action: str,
+    expected_timeout: float,
+    result: dict,
+) -> None:
+    invoked = asyncio.Event()
+    observed_timeouts = []
+    real_wait_for = asyncio.wait_for
+
+    async def handler(_payload):
+        invoked.set()
+        return result
+
+    async def recording_wait_for(awaitable, *, timeout):
+        observed_timeouts.append(timeout)
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", action, "A" * 16)
+    )
+    _allow_handler(monkeypatch, handler)
+    monkeypatch.setattr(
+        plugin_interactions_module, "_OPEN_HANDLER_TIMEOUT_SECONDS", 0.011
+    )
+    monkeypatch.setattr(
+        plugin_interactions_module, "_DEFERRED_HANDLER_TIMEOUT_SECONDS", 0.022
+    )
+    monkeypatch.setattr(plugin_interactions_module.asyncio, "wait_for", recording_wait_for)
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert invoked.is_set()
+    assert observed_timeouts == [expected_timeout]
+
+
+@pytest.mark.asyncio
+async def test_blocking_sync_open_handler_times_out_after_start_with_one_ack(
+    monkeypatch,
+) -> None:
+    release = threading.Event()
+    events = []
+    handler_calls = []
+
+    def handler(payload):
+        handler_calls.append(payload)
+        events.append("handler_started")
+        release.wait()
+        return _modal_result()
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "open_form", "A" * 16)
+    )
+    interaction.response.send_message.side_effect = (
+        lambda *_args, **_kwargs: events.append("timeout_ack")
+    )
+    _allow_handler(monkeypatch, handler)
+    monkeypatch.setattr(
+        plugin_interactions_module, "_OPEN_HANDLER_TIMEOUT_SECONDS", 0.01
+    )
+
+    try:
+        assert await bridge.handle_interaction(interaction) is True
+    finally:
+        release.set()
+
+    assert events == ["handler_started", "timeout_ack"]
+    assert len(handler_calls) == 1
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    assert interaction.response.send_message.await_args.kwargs == {"ephemeral": True}
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_async_deferred_handler_times_out_after_defer_with_one_error(
+    monkeypatch,
+) -> None:
+    pending = asyncio.get_running_loop().create_future()
+    events = []
+    handler_calls = []
+
+    async def handler(payload):
+        handler_calls.append(payload)
+        events.append("handler_started")
+        return await pending
+
+    bridge = DiscordPluginInteractionBridge(
+        adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
+    )
+    interaction = _fake_interaction(
+        encode_custom_id("plugin-one", "submit_choice", "A" * 16)
+    )
+    interaction.response.defer.side_effect = lambda: events.append("defer")
+    interaction.followup.send.side_effect = (
+        lambda *_args, **_kwargs: events.append("timeout_error")
+    )
+    _allow_handler(monkeypatch, handler)
+    monkeypatch.setattr(
+        plugin_interactions_module, "_DEFERRED_HANDLER_TIMEOUT_SECONDS", 0.01
+    )
+
+    assert await bridge.handle_interaction(interaction) is True
+
+    assert events == ["defer", "handler_started", "timeout_error"]
+    assert len(handler_calls) == 1
+    assert pending.cancelled()
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.response.send_message.assert_not_awaited()
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once()
+    assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+    interaction.edit_original_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio

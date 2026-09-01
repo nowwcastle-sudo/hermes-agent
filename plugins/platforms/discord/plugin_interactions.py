@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 import discord
@@ -24,6 +25,8 @@ _STYLE_MAP = {
     "success": discord.ButtonStyle.success,
     "danger": discord.ButtonStyle.danger,
 }
+_OPEN_HANDLER_TIMEOUT_SECONDS = 2.0
+_DEFERRED_HANDLER_TIMEOUT_SECONDS = 90.0
 
 
 class DiscordPluginInteractionBridge:
@@ -64,8 +67,20 @@ class DiscordPluginInteractionBridge:
         )
         if not is_modal_open and not await self._defer_once(interaction):
             return True
-        timeout = 2.0 if is_modal_open else 90.0
-        result = await asyncio.wait_for(handler(payload), timeout=timeout)
+        timeout = (
+            _OPEN_HANDLER_TIMEOUT_SECONDS
+            if is_modal_open
+            else _DEFERRED_HANDLER_TIMEOUT_SECONDS
+        )
+        try:
+            result = await asyncio.wait_for(
+                self._invoke_handler(handler, payload), timeout=timeout
+            )
+        except TimeoutError:
+            await self._handle_handler_timeout(
+                interaction, deferred=not is_modal_open
+            )
+            return True
         if payload["kind"] == "modal_submit" and (
             isinstance(result, dict) and result.get("kind") == "open_modal"
         ):
@@ -79,6 +94,23 @@ class DiscordPluginInteractionBridge:
         else:
             await self._apply_deferred_result(interaction, route, normalized)
         return True
+
+    @staticmethod
+    async def _invoke_handler(handler: Any, payload: dict[str, Any]) -> Any:
+        if inspect.iscoroutinefunction(handler):
+            return await handler(payload)
+        result = await asyncio.to_thread(handler, payload)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    @staticmethod
+    async def _handle_handler_timeout(interaction: Any, *, deferred: bool) -> None:
+        content = "요청 처리 시간이 초과됐어."
+        if deferred:
+            await interaction.followup.send(content, ephemeral=True)
+        else:
+            await DiscordPluginInteractionBridge._ephemeral_once(interaction, content)
 
     @staticmethod
     async def _defer_once(interaction: Any) -> bool:
