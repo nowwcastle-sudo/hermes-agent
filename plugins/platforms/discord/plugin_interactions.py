@@ -66,6 +66,11 @@ class DiscordPluginInteractionBridge:
             return True
         timeout = 2.0 if is_modal_open else 90.0
         result = await asyncio.wait_for(handler(payload), timeout=timeout)
+        if payload["kind"] == "modal_submit" and (
+            isinstance(result, dict) and result.get("kind") == "open_modal"
+        ):
+            await interaction.followup.send("처리할 수 없는 응답이야.", ephemeral=True)
+            return True
         normalized = validate_interaction_result(
             result, interaction_kind=payload["kind"]
         )
@@ -79,7 +84,14 @@ class DiscordPluginInteractionBridge:
     async def _defer_once(interaction: Any) -> bool:
         if interaction.response.is_done():
             return False
-        await interaction.response.defer()
+        try:
+            await interaction.response.defer()
+        except Exception as exc:
+            not_found = getattr(discord, "NotFound", None)
+            is_not_found = isinstance(not_found, type) and isinstance(exc, not_found)
+            if getattr(exc, "code", None) == 10062 or is_not_found:
+                return False
+            raise
         return True
 
     @staticmethod
@@ -89,10 +101,30 @@ class DiscordPluginInteractionBridge:
 
     @staticmethod
     def _normalize_interaction(interaction: Any, route: dict[str, str]) -> dict:
+        data = getattr(interaction, "data", None) or {}
+        is_modal_submit = (
+            getattr(interaction, "type", None) is discord.InteractionType.modal_submit
+        )
+        modal_values = {}
+        rows = data.get("components", [])
+        if is_modal_submit and isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                components = row.get("components", [])
+                if not isinstance(components, list):
+                    continue
+                for component in components:
+                    if not isinstance(component, dict):
+                        continue
+                    custom_id = component.get("custom_id")
+                    value = component.get("value")
+                    if isinstance(custom_id, str) and isinstance(value, str):
+                        modal_values[custom_id] = value
         payload = {
             "api_version": 1,
             "interaction_id": str(interaction.id),
-            "kind": "button",
+            "kind": "modal_submit" if is_modal_submit else "button",
             "plugin_id": route["plugin_id"],
             "action": route["action"],
             "route_token": route["route_token"],
@@ -100,7 +132,7 @@ class DiscordPluginInteractionBridge:
             "guild_id": str(interaction.guild_id),
             "channel_id": str(interaction.channel_id),
             "message_id": str(interaction.message.id),
-            "modal_values": {},
+            "modal_values": modal_values,
         }
         if "component_value" in route:
             payload["component_value"] = route["component_value"]
