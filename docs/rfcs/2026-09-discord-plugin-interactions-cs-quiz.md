@@ -105,6 +105,7 @@ DiscordInteraction
 DiscordComponentSpec
 - type: button
 - action                    # host가 custom ID에 encode
+- route_token               # 16~43자의 opaque router; host가 custom ID에 encode
 - label
 - style: primary | secondary | success | danger
 - value                     # optional opaque display choice
@@ -211,7 +212,7 @@ Message별 View 복원 목록을 저장하지 않는다. Custom ID에는 다음�
 host-derived plugin namespace + action + opaque route token
 ```
 
-`route_token`은 `secrets.token_urlsafe()`로 생성한 충분히 강한 session identifier이며 state에 영속화한다. Interaction은 durable state에서 `guild_id + channel_id + message_id + route_token`과 다시 대조한다.
+`session_id`는 `csq-YYYY-MM-DD`이고 `route_token`은 그 ID의 SHA-256 앞 24 hex 문자로 만든 stable opaque router다. Token은 authorization secret가 아니다. 실제 권한은 host allowlist와 plugin의 durable `guild_id + channel_id + message_id + route_token` 대조가 담당한다.
 
 ## 7. Atomic plugin state seam
 
@@ -263,7 +264,7 @@ Plugin이 외부에 노출하는 domain 진입점은 두 개뿐이다.
 
 별도 DB는 만들지 않는다. `ctx.state`의 profile isolation, lock, atomic replacement, mode `0600`, 10 MiB quota를 사용한다.
 
-`StateStore`는 성공한 commit 후 별도 `ctx.state.data_dir/_백업_원본_quiz_state.json`에 직전 정상 snapshot 하나만 stdlib atomic replace로 보관한다. State 원본이 파손되면 자동으로 빈 상태를 쓰지 않고 backup을 검증해 read-only 복구 후보로 제시한다. 실제 원본 교체는 운영자 승인 뒤 수행한다.
+Core `PluginState`는 `set()`과 `compare_and_set()`이 사용하는 같은 cross-process file lock 안에서 기존 정상 state 전체를 `_백업_원본_state.json` 한 세대로 atomic replace한 뒤 새 primary를 쓴다. `ctx.state.get_backup(key)`는 backup을 읽기 전용으로 노출한다. Plugin `StateStore`는 backup을 별도로 쓰지 않고 `get_backup("quiz")`만 검증해 복구 후보로 제시한다. State 원본이 파손되면 자동으로 빈 상태를 쓰거나 교체하지 않으며, 실제 원본 교체는 운영자 승인 뒤 수행한다.
 
 ## 9. Cron and start idempotency
 
@@ -307,7 +308,8 @@ Owner user ID, guild ID, channel ID의 정본은 plugin settings다. Pilot state
 ### 10.1 QuizSession
 
 ```text
-id                          # opaque route token과 동일
+id                          # csq-YYYY-MM-DD
+route_token                 # stable opaque router, authorization secret 아님
 local_date
 status: generating | active | completed | expired | failed
 revision
@@ -316,6 +318,7 @@ expires_at
 generation_attempt
 generation_lease_until
 generation_claim_id
+generation_owner
 current_question_index
 current_question_presented_at
 pending_supplement_id
@@ -489,7 +492,8 @@ interaction
 Domain state가 정본이다.
 
 - State 전이 때 `desired_view_revision`을 증가시키고 `render_pending=true`로 저장한다.
-- Message update 성공 뒤에만 `rendered_view_revision=desired_view_revision`, `render_pending=false`로 CAS 저장한다.
+- Plugin은 deferred callback 안에서 `ctx.discord.update(channel_id, message_id, spec)`를 직접 호출해 receipt를 받는다. `ok=true` 뒤에만 `rendered_view_revision=desired_view_revision`, `render_pending=false`로 CAS 저장하고 callback은 `no_change`를 반환한다.
+- Update error receipt면 `render_pending=true`를 유지하고 bounded ephemeral 안내를 반환한다. Host가 plugin 반환 뒤 대신 edit하는 `update_message` directive는 durable render acknowledgement에 사용하지 않는다.
 - 정상 stale/중복 interaction은 오류만 반환하지 않고 현재 durable state를 다시 render한다.
 - 변조 token, 잘못된 owner/channel/message는 fail-closed 한다.
 - Plugin 등록, gateway 시작, `cs_quiz_start` 때 pending render를 reconciliation한다.
@@ -514,6 +518,8 @@ Plugin code가 다음을 먼저 결정한다.
 - 분야별 난이도
 - 복습 concept
 - 언어 문법·framework 문제 금지
+
+Pilot vocabulary는 7개 분야별 4개 language-agnostic concept, 총 28개로 고정한다. Scenario pattern은 `duplicate_submission`, `stale_ui_after_restart`, `concurrent_update`, `latency_timeout`, `data_validation`, `permission_scope`, `schedule_boundary`, `partial_failure`, `cache_miss`, `audit_reconciliation`, `resource_limit`, `schema_migration`의 12개다. 28×12=336조합이므로 pilot 기본 300문제에서 `concept_key + scenario_pattern`을 반복하지 않는다.
 
 LLM은 이 slot 안에서 scenario와 문항을 작성한다.
 
@@ -761,9 +767,10 @@ uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-
 3. `pilot_enabled=false`로 유지한다.
 4. 전용 channel을 만들고 owner/bot 중심 권한을 검토한다.
 5. Quiz channel만 mention-free로 설정한다.
-6. Day 0 manual smoke를 수행한다.
-7. Cron을 만들고 name, schedule, timezone, delivery, enabled state를 read-back한다.
-8. 사용자가 pilot 시작 local date와 `pilot_enabled=true`를 최종 승인한다.
+6. `pilot_enabled=false`인 상태에서 Cron을 만들고 즉시 pause한 뒤 name, schedule, timezone, delivery, toolset, paused state를 read-back한다.
+7. 사용자가 pilot 시작 local date D, `pilot_enabled=true`, exact cron resume와 manual run을 최종 승인한다.
+8. Pilot을 enable하고 cron을 resume한 뒤 exact job을 한 번 manual run한다. 이 첫 실제 session이 D이자 live smoke다.
+9. Live smoke가 통과한 경우에만 cron을 enabled 상태로 유지한다. 실패하면 승인 뒤 cron pause → pilot disable 순서로 멈추고 state는 보존한다.
 
 Channel·permission 생성, config 변경, capability grant, cron 생성·활성화, pilot 활성화는 외부 write다. 구현 완료가 운영 활성화 승인을 대신하지 않는다.
 
