@@ -478,6 +478,49 @@ def test_custom_id_round_trip_and_limit() -> None:
     }
 
 
+def test_custom_id_optional_component_value_round_trip() -> None:
+    custom_id = encode_custom_id(
+        "cs-quiz", "submit_choice", "A" * 24, "선택-A"
+    )
+
+    assert decode_custom_id(custom_id) == {
+        "plugin_id": "cs-quiz",
+        "action": "submit_choice",
+        "route_token": "A" * 24,
+        "component_value": "선택-A",
+    }
+
+
+def test_custom_id_four_segment_form_remains_backward_compatible() -> None:
+    custom_id = "hdi1.Y3MtcXVpeg.submit_choice." + "A" * 24
+
+    assert decode_custom_id(custom_id) == {
+        "plugin_id": "cs-quiz",
+        "action": "submit_choice",
+        "route_token": "A" * 24,
+    }
+
+
+@pytest.mark.parametrize("encoded_value", ["", "YQ==", "_w"])
+def test_custom_id_rejects_malformed_or_non_utf8_component_value(
+    encoded_value: str,
+) -> None:
+    custom_id = (
+        "hdi1.Y3MtcXVpeg.submit_choice." + "A" * 24 + "." + encoded_value
+    )
+
+    with pytest.raises(ValueError, match="custom ID"):
+        decode_custom_id(custom_id)
+
+
+def test_custom_id_optional_component_value_obeys_90_character_budget() -> None:
+    custom_id = encode_custom_id("cs-quiz", "submit_choice", "A" * 24, "v" * 26)
+
+    assert len(custom_id) == 90
+    with pytest.raises(ValueError, match="custom ID"):
+        encode_custom_id("cs-quiz", "submit_choice", "A" * 24, "v" * 27)
+
+
 @pytest.mark.parametrize(
     "raw",
     [

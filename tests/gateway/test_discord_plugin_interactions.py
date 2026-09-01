@@ -71,12 +71,13 @@ def test_renderer_uses_canonical_namespace_and_only_approved_native_fields() -> 
     assert button.label == "Choice A"
     assert button.style == discord_adapter_module.discord.ButtonStyle.success
     assert button.disabled is True
-    assert button.value == "choice-a"
+    assert not hasattr(button, "value")
     assert button.callback is None
     assert decode_custom_id(button.custom_id) == {
         "plugin_id": "cs-quiz",
         "action": "submit_choice",
         "route_token": "A" * 24,
+        "component_value": "choice-a",
     }
     visible = " ".join(
         [kwargs["content"], embed.title, embed.description, button.label]

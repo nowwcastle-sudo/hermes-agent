@@ -154,3 +154,85 @@ paths:
 ## Concerns
 
 None.
+
+## Fix Round 1 — component value serialization
+
+### Status
+
+**DONE**
+
+The binding Important finding was reproduced and fixed without addressing deferred Minors or Task 5. Button `value` is now routing data carried in the host-owned custom ID rather than an arbitrary Python attribute that discord.py omits from serialization.
+
+### Scope
+
+- Extended `encode_custom_id` backward-compatibly to emit `hdi1.<plugin_b64>.<action>.<route_token>[.<value_b64>]`.
+- Preserved the exact four-segment encoding and decode result when no value is supplied.
+- Encoded present non-empty UTF-8 values with canonical unpadded URL-safe base64 and retained the total 90-character budget.
+- Rejected empty, padded/non-canonical, malformed, and non-UTF-8 fifth segments before routing.
+- Exposed a decoded fifth segment as `component_value`.
+- Passed the validated component value into the codec from the Discord renderer and removed the arbitrary `button.value` assignment.
+- Added a native discord.py 2.7.1 `Button.to_component_dict()` plus `View.to_components()` smoke test proving serialized `custom_id` retains and recovers `component_value`.
+- Updated the binding RFC wire contract and recovery/security description.
+
+### RED evidence
+
+Tests were added before production changes. The focused command used real discord.py 2.7.1 for the serialization smoke:
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio --with discord.py==2.7.1 pytest -q tests/hermes_cli/test_discord_interactions.py -k 'custom_id' tests/hermes_cli/test_discord_component_serialization.py
+3 failed, 23 passed, 98 deselected, 1 warning in 4.34s
+```
+
+The failures were the expected missing behavior: both four-argument codec calls raised `TypeError`, and native serialized decode lacked `component_value` (`KeyError`).
+
+### Focused GREEN evidence
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio --with discord.py==2.7.1 pytest -q tests/hermes_cli/test_discord_interactions.py -k 'custom_id' tests/hermes_cli/test_discord_component_serialization.py
+26 passed, 98 deselected, 1 warning in 7.66s
+
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/gateway/test_discord_plugin_interactions.py
+13 passed in 1.69s
+```
+
+The warning is discord.py 2.7.1 importing Python's deprecated `audioop` module; it is third-party noise unrelated to this change.
+
+### Full Tasks 2–4 and Discord regression evidence
+
+```text
+uv run --no-project --python 3.11 --with-editable . --with pytest --with pytest-asyncio pytest -q tests/hermes_cli/test_plugin_capabilities.py tests/hermes_cli/test_discord_interactions.py tests/gateway/test_discord_plugin_interactions.py tests/gateway/test_discord_send.py tests/gateway/test_discord_clarify_buttons.py tests/gateway/test_discord_component_auth.py tests/gateway/test_discord_platform_events.py
+227 passed in 17.56s
+```
+
+### Ruff and diff evidence
+
+```text
+uv run --no-project --python 3.11 --with ruff ruff check hermes_cli/discord_interactions.py plugins/platforms/discord/plugin_interactions.py tests/hermes_cli/test_discord_interactions.py tests/hermes_cli/test_discord_component_serialization.py tests/gateway/test_discord_plugin_interactions.py
+All checks passed!
+
+git diff --check
+exit 0, no output
+```
+
+### Files in Fix Round 1
+
+- Modified `hermes_cli/discord_interactions.py`.
+- Modified `plugins/platforms/discord/plugin_interactions.py`.
+- Modified `tests/hermes_cli/test_discord_interactions.py`.
+- Created `tests/hermes_cli/test_discord_component_serialization.py`.
+- Modified `tests/gateway/test_discord_plugin_interactions.py`.
+- Modified `docs/rfcs/2026-09-discord-plugin-interactions-cs-quiz.md`.
+- Appended this Fix Round 1 evidence to `task-4-report.md`.
+
+### Staged credential scan
+
+`detect-secrets` scanned all seven staged approved code, test, RFC, and report files. Its JSON output was reduced to count and paths only; no matching lines or values were printed.
+
+```text
+matches=0
+paths=
+```
+
+### Fix Round 1 concerns
+
+None. The native smoke emits only the documented third-party `audioop` deprecation warning.

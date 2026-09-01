@@ -76,11 +76,10 @@ class DiscordPluginInteractionBridge:
                     plugin_id,
                     component["action"],
                     component["route_token"],
+                    component.get("value"),
                 ),
                 disabled=component["disabled"],
             )
-            if "value" in component:
-                button.value = component["value"]
             view.add_item(button)
 
         return {"content": normalized["content"], "embeds": embeds, "view": view}

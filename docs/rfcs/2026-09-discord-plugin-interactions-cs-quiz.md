@@ -97,7 +97,7 @@ DiscordInteraction
 - guild_id
 - channel_id
 - message_id
-- component_value           # button일 때 optional
+- component_value           # button value가 custom ID에 있었을 때 decode하여 복원
 - modal_values              # modal_submit일 때 map
 ```
 
@@ -108,7 +108,7 @@ DiscordComponentSpec
 - route_token               # 16~43자의 opaque router; host가 custom ID에 encode
 - label
 - style: primary | secondary | success | danger
-- value                     # optional opaque display choice
+- value                     # optional non-empty UTF-8 opaque routing choice; custom ID에 encode
 - disabled: bool
 ```
 
@@ -206,11 +206,13 @@ Capability는 sandbox가 아니다. 설치된 in-process plugin code는 신뢰�
 
 ### 6.6 Persistent routing
 
-Message별 View 복원 목록을 저장하지 않는다. Custom ID에는 다음만 encode하며 전체 길이는 90자 이하로 제한한다.
+Message별 View 복원 목록을 저장하지 않는다. Custom ID wire format은 다음과 같고 전체 길이는 90자 이하로 제한한다.
 
 ```text
-host-derived plugin namespace + action + opaque route token
+hdi1.<plugin_b64>.<action>.<route_token>[.<value_b64>]
 ```
+
+`plugin_b64`와 optional `value_b64`는 padding 없는 canonical URL-safe base64이다. `value`가 없으면 기존 4-segment form을 그대로 생성·수용한다. `value`가 있으면 non-empty UTF-8 bytes를 optional 5번째 segment에 encode하고, interaction dispatch 시 이를 decode하여 `component_value`로 복원한다. Malformed, non-canonical, non-UTF-8 value segment는 callback 전에 거절한다. 이 value는 routing data이지 confidential data나 authorization secret가 아니다.
 
 `session_id`는 `csq-YYYY-MM-DD`이고 `route_token`은 그 ID의 SHA-256 앞 24 hex 문자로 만든 stable opaque router다. Token은 authorization secret가 아니다. 실제 권한은 host allowlist와 plugin의 durable `guild_id + channel_id + message_id + route_token` 대조가 담당한다.
 

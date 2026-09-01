@@ -182,7 +182,12 @@ class DiscordInteractions:
         return _normalize_update_receipt(receipt)
 
 
-def encode_custom_id(plugin_id: str, action: str, route_token: str) -> str:
+def encode_custom_id(
+    plugin_id: str,
+    action: str,
+    route_token: str,
+    component_value: str | None = None,
+) -> str:
     """Encode the host-owned plugin namespace and opaque routing fields."""
     if (
         not isinstance(plugin_id, str)
@@ -191,18 +196,30 @@ def encode_custom_id(plugin_id: str, action: str, route_token: str) -> str:
         or not _ACTION_RE.fullmatch(action)
         or not isinstance(route_token, str)
         or not _TOKEN_RE.fullmatch(route_token)
+        or (component_value is not None and not isinstance(component_value, str))
+        or component_value == ""
     ):
         raise ValueError(_ERROR)
     try:
         encoded_plugin = base64.urlsafe_b64encode(plugin_id.encode("utf-8")).decode(
             "ascii"
         ).rstrip("=")
+        encoded_value = (
+            base64.urlsafe_b64encode(component_value.encode("utf-8"))
+            .decode("ascii")
+            .rstrip("=")
+            if component_value is not None
+            else None
+        )
     except UnicodeError as exc:
         raise ValueError(_ERROR) from exc
-    value = ".".join((_PREFIX, encoded_plugin, action, route_token))
-    if len(value) > 90:
+    segments = [_PREFIX, encoded_plugin, action, route_token]
+    if encoded_value is not None:
+        segments.append(encoded_value)
+    custom_id = ".".join(segments)
+    if len(custom_id) > 90:
         raise ValueError(_ERROR)
-    return value
+    return custom_id
 
 
 def decode_custom_id(custom_id: str) -> dict[str, str]:
@@ -210,14 +227,19 @@ def decode_custom_id(custom_id: str) -> dict[str, str]:
     if not isinstance(custom_id, str) or len(custom_id) > 90:
         raise ValueError(_ERROR)
     segments = custom_id.split(".")
-    if len(segments) != 4:
+    if len(segments) not in (4, 5):
         raise ValueError(_ERROR)
-    prefix, encoded_plugin, action, route_token = segments
+    prefix, encoded_plugin, action, route_token = segments[:4]
+    encoded_value = segments[4] if len(segments) == 5 else None
     if (
         prefix != _PREFIX
         or not _PLUGIN_B64_RE.fullmatch(encoded_plugin)
         or not _ACTION_RE.fullmatch(action)
         or not _TOKEN_RE.fullmatch(route_token)
+        or (
+            encoded_value is not None
+            and not _PLUGIN_B64_RE.fullmatch(encoded_value)
+        )
     ):
         raise ValueError(_ERROR)
     try:
@@ -234,11 +256,28 @@ def decode_custom_id(custom_id: str) -> dict[str, str]:
         != encoded_plugin
     ):
         raise ValueError(_ERROR)
-    return {
+    decoded = {
         "plugin_id": plugin_id,
         "action": action,
         "route_token": route_token,
     }
+    if encoded_value is not None:
+        try:
+            padding = "=" * (-len(encoded_value) % 4)
+            value_bytes = base64.b64decode(
+                encoded_value + padding, altchars=b"-_", validate=True
+            )
+            component_value = value_bytes.decode("utf-8")
+        except (binascii.Error, UnicodeError) as exc:
+            raise ValueError(_ERROR) from exc
+        if (
+            not component_value
+            or base64.urlsafe_b64encode(value_bytes).decode("ascii").rstrip("=")
+            != encoded_value
+        ):
+            raise ValueError(_ERROR)
+        decoded["component_value"] = component_value
+    return decoded
 
 
 def _json_copy(value: object, error: str) -> object:
