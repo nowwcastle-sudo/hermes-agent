@@ -128,6 +128,14 @@ CAPABILITY_REGISTRY: Dict[str, CapabilitySpec] = {
                 "(add reactions, rename threads) via ctx.platform_actions"
             ),
         ),
+        CapabilitySpec(
+            id="gateway.discord_interactions",
+            legacy_path=("allow_discord_interactions",),
+            description=(
+                "Register Discord button and Modal callbacks and send or update "
+                "interactive messages as the connected gateway bot"
+            ),
+        ),
     )
 }
 

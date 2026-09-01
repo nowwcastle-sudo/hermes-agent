@@ -1586,6 +1586,33 @@ class PluginContext:
             self.manifest, kind, key, release
         )
 
+    def register_discord_interaction(
+        self,
+        handler: Callable,
+    ) -> PluginRegistration:
+        """Register this plugin's capability-gated Discord interaction handler."""
+        from hermes_cli.discord_interactions import CAPABILITY_ID
+
+        if not callable(handler):
+            raise TypeError("Discord interaction handler must be callable")
+        if not self.has_capability(CAPABILITY_ID):
+            raise PermissionError(
+                f"Plugin {self.plugin_id!r} requires capability {CAPABILITY_ID!r}"
+            )
+        plugin_id = self.plugin_id
+        handlers = self._manager._discord_interaction_handlers
+        if plugin_id in handlers:
+            raise ValueError(
+                f"Discord interaction handler already registered for {plugin_id!r}"
+            )
+        handlers[plugin_id] = handler
+
+        def release() -> None:
+            if handlers.get(plugin_id) is handler:
+                handlers.pop(plugin_id, None)
+
+        return self._track("discord_interaction", plugin_id, release)
+
     def _track_replacement(
         self,
         kind: str,
@@ -3485,6 +3512,7 @@ class PluginManager:
         # ``re.Pattern``, or a constraint dict); ``callback`` is an async
         # function with the slack_bolt signature ``(ack, body, action)``.
         self._slack_action_handlers: List[tuple] = []
+        self._discord_interaction_handlers: Dict[str, Callable] = {}
         # Registration handles are kept both per plugin (ownership lookup) and
         # globally (reverse-order teardown for overrides spanning plugins).
         #
@@ -3773,6 +3801,7 @@ class PluginManager:
             self._system_prompt_sections.clear()
             self._approval_transports.clear()
             self._slack_action_handlers.clear()
+            self._discord_interaction_handlers.clear()
             self._predeclared_modules.clear()
             self._predeclared_tools.clear()
             self._context_engine = None
@@ -3791,6 +3820,13 @@ class PluginManager:
     def has_gateway_message_injector(self) -> bool:
         """Return whether a live gateway can accept plugin-triggered turns."""
         return self._gateway_message_injector is not None
+
+    def get_discord_interaction_handler(
+        self,
+        plugin_id: str,
+    ) -> Optional[Callable]:
+        """Return this manager's handler for the canonical plugin id, if any."""
+        return self._discord_interaction_handlers.get(plugin_id)
 
     def set_gateway_message_injector(
         self,
