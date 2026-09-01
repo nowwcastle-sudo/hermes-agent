@@ -123,8 +123,13 @@ class DiscordInteractions:
             return None, _error("invalid_argument")
         return self._resolve_adapter()
 
-    async def _call(self, operation: Any, *args: object) -> tuple[object, dict[str, object] | None]:
+    async def _call(
+        self, adapter: Any, method_name: str, *args: object
+    ) -> tuple[object, dict[str, object] | None]:
         try:
+            operation = getattr(adapter, method_name)
+            if not callable(operation):
+                raise TypeError
             return await operation(*args), None
         except Exception:
             trace_id = uuid.uuid4().hex
@@ -145,7 +150,11 @@ class DiscordInteractions:
         except ValueError:
             return _error("invalid_argument")
         receipt, error = await self._call(
-            adapter.plugin_interaction_send, channel_id, normalized
+            adapter,
+            "plugin_interaction_send",
+            self._plugin_id,
+            channel_id,
+            normalized,
         )
         if error is not None:
             return error
@@ -161,7 +170,12 @@ class DiscordInteractions:
         except ValueError:
             return _error("invalid_argument")
         receipt, error = await self._call(
-            adapter.plugin_interaction_update, channel_id, message_id, normalized
+            adapter,
+            "plugin_interaction_update",
+            self._plugin_id,
+            channel_id,
+            message_id,
+            normalized,
         )
         if error is not None:
             return error

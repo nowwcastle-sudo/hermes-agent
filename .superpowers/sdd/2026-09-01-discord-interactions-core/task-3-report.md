@@ -198,3 +198,73 @@ git diff --check
 ## Concerns
 
 None.
+
+## Fix Round 1
+
+### Status
+
+**DONE**
+
+Fixed only the two Important review findings. Public `send(channel_id, spec)` and
+`update(channel_id, message_id, spec)` signatures and receipt normalization are
+unchanged; the Task 4 adapter remains unimplemented and deferred Minors remain
+untouched.
+
+### Changes
+
+- The facade now passes canonical `self._plugin_id` as the first internal adapter
+  argument for both `plugin_interaction_send` and `plugin_interaction_update`.
+- `_call` now resolves the approved method and verifies callability inside its
+  protected boundary. Missing, non-callable, and descriptor-raising methods return
+  exactly `{"ok": false, "error_code": "adapter_error"}` and log only the plugin
+  ID plus a generated 32-hex trace ID, without exception text.
+- Fake-adapter tests now enforce the canonical `"cs-quiz"` namespace argument and
+  cover both verbs for missing methods, non-callable methods, and raising
+  descriptors/properties.
+
+### RED evidence
+
+Canonical namespace tests failed before implementation:
+
+```text
+FF                                                                       [100%]
+2 failed in 1.61s
+```
+
+The send mock received `("10", spec)` instead of `("cs-quiz", "10", spec)`, and
+the update mock exposed three arguments instead of the required four.
+
+Method-boundary tests before implementation:
+
+```text
+FF..FF                                                                   [100%]
+4 failed, 2 passed, 111 deselected in 1.63s
+```
+
+Missing methods leaked raw `AttributeError`; raising descriptors leaked raw
+`RuntimeError` including the sensitive descriptor text. Non-callable methods were
+already caught at invocation time, and their two new regression cases passed; the
+explicit callability check was still moved inside `_call` as required.
+
+### GREEN and final verification
+
+```text
+Focused fixes: 8 passed, 109 deselected in 1.72s
+Task 2+3 contract/capability tests: 156 passed in 37.90s
+PluginContext wiring: 1 passed in 0.98s
+Plugin force-reload/unload lifecycle: 2 passed, 63 deselected in 6.28s
+Ownership-ledger lifecycle: 4 passed in 1.89s
+Ruff: All checks passed!
+git diff --check: exit 0, no output
+```
+
+### Self-review
+
+- Diff is limited to the Task 3 facade, its fake-adapter tests, and this report.
+- The implementation preserves the existing gate order, validation, public API,
+  stable error envelopes, and receipt reconstruction.
+- No deferred Minor or Task 4 adapter work is included.
+
+### Concerns
+
+None.

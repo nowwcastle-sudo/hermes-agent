@@ -95,6 +95,23 @@ def _granted_adapter(monkeypatch) -> SimpleNamespace:
     return adapter
 
 
+def _install_granted_adapter(monkeypatch, adapter: object) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.plugin_capabilities.plugin_capability_granted",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "gateway.run._gateway_runner_ref",
+        lambda: SimpleNamespace(adapters={Platform.DISCORD: adapter}),
+    )
+
+
+async def _invoke(interactions: DiscordInteractions, verb: str) -> dict:
+    if verb == "send":
+        return await interactions.send("10", valid_message_spec())
+    return await interactions.update("10", "20", valid_message_spec())
+
+
 @pytest.mark.asyncio
 async def test_send_rechecks_capability_and_returns_normalized_receipt(
     monkeypatch,
@@ -128,8 +145,67 @@ async def test_send_rechecks_capability_and_returns_normalized_receipt(
         "message_id": "20",
         "error_code": "",
     }
-    adapter.plugin_interaction_send.assert_awaited_once_with("10", spec)
+    adapter.plugin_interaction_send.assert_awaited_once_with("cs-quiz", "10", spec)
     assert result is not receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["send", "update"])
+async def test_missing_adapter_method_returns_stable_error_and_trace_id(
+    monkeypatch, caplog, verb: str
+) -> None:
+    _install_granted_adapter(monkeypatch, SimpleNamespace(is_connected=True))
+
+    with caplog.at_level(logging.ERROR, logger="hermes_cli.discord_interactions"):
+        result = await _invoke(DiscordInteractions("cs-quiz"), verb)
+
+    assert result == {"ok": False, "error_code": "adapter_error"}
+    assert re.search(r"trace_id=[0-9a-f]{32}\b", caplog.text)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["send", "update"])
+async def test_non_callable_adapter_method_returns_stable_error_and_trace_id(
+    monkeypatch, caplog, verb: str
+) -> None:
+    adapter = SimpleNamespace(is_connected=True)
+    setattr(adapter, f"plugin_interaction_{verb}", None)
+    _install_granted_adapter(monkeypatch, adapter)
+
+    with caplog.at_level(logging.ERROR, logger="hermes_cli.discord_interactions"):
+        result = await _invoke(DiscordInteractions("cs-quiz"), verb)
+
+    assert result == {"ok": False, "error_code": "adapter_error"}
+    assert re.search(r"trace_id=[0-9a-f]{32}\b", caplog.text)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["send", "update"])
+async def test_raising_adapter_method_descriptor_hides_exception_and_logs_trace_id(
+    monkeypatch, caplog, verb: str
+) -> None:
+    sensitive_text = "descriptor secret=do-not-expose"
+
+    class RaisingOperationAdapter:
+        is_connected = True
+
+        @property
+        def plugin_interaction_send(self):
+            raise RuntimeError(sensitive_text)
+
+        @property
+        def plugin_interaction_update(self):
+            raise RuntimeError(sensitive_text)
+
+    _install_granted_adapter(monkeypatch, RaisingOperationAdapter())
+
+    with caplog.at_level(logging.ERROR, logger="hermes_cli.discord_interactions"):
+        result = await _invoke(DiscordInteractions("cs-quiz"), verb)
+
+    assert result == {"ok": False, "error_code": "adapter_error"}
+    assert sensitive_text not in str(result)
+    assert sensitive_text not in caplog.text
+    assert re.search(r"trace_id=[0-9a-f]{32}\b", caplog.text)
 
 
 @pytest.mark.asyncio
@@ -279,8 +355,10 @@ async def test_update_calls_only_interaction_update_and_normalizes_success(
 
     assert result == {"ok": True, "error_code": ""}
     adapter.plugin_interaction_update.assert_awaited_once()
-    channel_id, message_id, normalized = adapter.plugin_interaction_update.await_args.args
-    assert (channel_id, message_id) == ("10", "20")
+    plugin_id, channel_id, message_id, normalized = (
+        adapter.plugin_interaction_update.await_args.args
+    )
+    assert (plugin_id, channel_id, message_id) == ("cs-quiz", "10", "20")
     assert normalized == spec
     assert normalized is not spec
     adapter.plugin_interaction_send.assert_not_awaited()
