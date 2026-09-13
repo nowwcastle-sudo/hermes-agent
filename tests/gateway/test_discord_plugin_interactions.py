@@ -1257,7 +1257,7 @@ async def test_undeferred_no_change_sends_one_bounded_initial_ephemeral_ack(
 
 
 @pytest.mark.asyncio
-async def test_modal_id_inherits_host_route_and_payload_keeps_component_value(
+async def test_open_button_component_value_is_preserved_in_modal_custom_id(
     monkeypatch,
 ) -> None:
     result = _modal_result(action="submit_inherited")
@@ -1276,19 +1276,20 @@ async def test_modal_id_inherits_host_route_and_payload_keeps_component_value(
         adapter=SimpleNamespace(_allowed_user_ids={"202"}, _allowed_role_ids=set())
     )
     interaction = _fake_interaction(
-        encode_custom_id("canonical-plugin", "open_form", "R" * 24, "choice-z")
+        encode_custom_id("canonical-plugin", "open_form", "R" * 24, "q7")
     )
     _allow_handler(monkeypatch, handler)
 
     assert await bridge.handle_interaction(interaction) is True
 
     payload = handler.await_args.args[0]
-    assert payload["component_value"] == "choice-z"
+    assert payload["component_value"] == "q7"
     modal = interaction.response.send_modal.await_args.args[0]
     assert decode_custom_id(modal.custom_id) == {
         "plugin_id": "canonical-plugin",
         "action": "submit_inherited",
         "route_token": "R" * 24,
+        "component_value": "q7",
     }
     assert [(field.custom_id, field.max_length) for field in modal.children] == [
         ("answer", 300),
@@ -1723,6 +1724,7 @@ async def test_modal_submit_defers_before_handler_with_nested_text_values(
 
     async def handler(payload):
         events.append(("handler", payload["kind"]))
+        assert "component_value" not in payload
         assert payload["modal_values"] == {
             "answer": "cache invalidation",
             "details": "nested input",
@@ -1801,9 +1803,7 @@ async def test_button_and_modal_payloads_have_exact_json_v1_fields(monkeypatch) 
         encode_custom_id("plugin-one", "submit_choice", "A" * 16, "choice-a")
     )
     modal = _fake_modal_submit(
-        encode_custom_id(
-            "plugin-one", "submit_answer", "B" * 16, "injected-button-value"
-        ),
+        encode_custom_id("plugin-one", "submit_answer", "B" * 16, "q7"),
         [{"components": [{"custom_id": "answer", "value": "two"}]}],
     )
     _allow_handler(monkeypatch, handler)
@@ -1837,6 +1837,7 @@ async def test_button_and_modal_payloads_have_exact_json_v1_fields(monkeypatch) 
             "guild_id": "303",
             "channel_id": "404",
             "message_id": "505",
+            "component_value": "q7",
             "modal_values": {"answer": "two"},
         },
     ]

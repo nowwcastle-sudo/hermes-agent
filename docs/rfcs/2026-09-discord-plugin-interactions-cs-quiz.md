@@ -97,7 +97,7 @@ DiscordInteraction
 - guild_id
 - channel_id
 - message_id
-- component_value           # button value가 custom ID에 있었을 때 decode하여 복원
+- component_value           # interaction custom ID에 value가 있었을 때 decode하여 복원
 - modal_values              # modal_submit일 때 map
 ```
 
@@ -142,7 +142,7 @@ DiscordInteractionResult
 - no_change
 ```
 
-`open_modal`은 button interaction의 최초 응답에서만 허용한다. `open_`은 host가 예약한 generic action prefix다. 모든 `open_*` button callback은 defer하지 않고 2초 timeout 안에서 최초 응답을 만들어야 한다. `답변 입력` button은 action을 `open_short_answer` 또는 `open_essay`로 encode하므로 state I/O 없이 정해진 Modal을 만들 수 있다. Plugin author는 일반적인 deferred 작업에 `open_*` action을 사용하면 안 된다. `modal_submit`은 `open_modal`을 반환할 수 없다. Host는 schema에 없는 field와 잘못된 result-kind 조합을 거절한다.
+`open_modal`은 button interaction의 최초 응답에서만 허용한다. `open_`은 host가 예약한 generic action prefix다. 모든 `open_*` button callback은 defer하지 않고 2초 timeout 안에서 최초 응답을 만들어야 한다. `답변 입력` button은 action을 `open_short_answer` 또는 `open_essay`로 encode하므로 state I/O 없이 정해진 Modal을 만들 수 있다. 이 opening button에 optional `value`가 있으면 host는 같은 값을 Modal custom ID에 보존하고, Modal 제출의 `component_value`로 복원한다. Plugin author는 일반적인 deferred 작업에 `open_*` action을 사용하면 안 된다. `modal_submit`은 `open_modal`을 반환할 수 없다. Host는 schema에 없는 field와 잘못된 result-kind 조합을 거절한다.
 
 ### 6.2 Registration
 
@@ -223,7 +223,7 @@ Message별 View 복원 목록을 저장하지 않는다. Custom ID wire format�
 hdi1.<plugin_b64>.<action>.<route_token>[.<value_b64>]
 ```
 
-`plugin_b64`와 optional `value_b64`는 padding 없는 canonical URL-safe base64이다. `value`가 없으면 기존 4-segment form을 그대로 생성·수용한다. `value`가 있으면 non-empty UTF-8 bytes를 optional 5번째 segment에 encode하고, interaction dispatch 시 이를 decode하여 `component_value`로 복원한다. Malformed, non-canonical, non-UTF-8 value segment는 callback 전에 거절한다. 이 value는 routing data이지 confidential data나 authorization secret가 아니다.
+`plugin_b64`와 optional `value_b64`는 padding 없는 canonical URL-safe base64이다. `value`가 없으면 기존 4-segment form을 그대로 생성·수용한다. `value`가 있으면 non-empty UTF-8 bytes를 optional 5번째 segment에 encode하고, interaction dispatch 시 이를 decode하여 `component_value`로 복원한다. `open_*` button이 `open_modal`을 반환할 때 host는 opening custom ID의 optional value segment를 Modal custom ID의 optional value segment로 그대로 이어서 Modal 제출에서도 `component_value`를 복원한다. Malformed, non-canonical, non-UTF-8 value segment는 callback 전에 거절한다. 이 value는 routing data이지 confidential data나 authorization secret가 아니다.
 
 `session_id`는 `csq-YYYY-MM-DD`이고 `route_token`은 그 ID의 SHA-256 앞 24 hex 문자로 만든 stable opaque router다. Token은 authorization secret가 아니다. 실제 권한은 host allowlist와 plugin의 durable `guild_id + channel_id + message_id + route_token` 대조가 담당한다.
 

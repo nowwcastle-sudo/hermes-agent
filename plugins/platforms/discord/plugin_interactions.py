@@ -246,17 +246,22 @@ class DiscordPluginInteractionBridge:
             "message_id": str(interaction.message.id),
             "modal_values": modal_values,
         }
-        if payload["kind"] == "button" and "component_value" in route:
+        if "component_value" in route:
             payload["component_value"] = route["component_value"]
         return payload
 
     @staticmethod
     def _build_modal(
-        plugin_id: str, route_token: str, spec: dict[str, Any]
+        plugin_id: str,
+        route_token: str,
+        spec: dict[str, Any],
+        component_value: str | None = None,
     ) -> discord.ui.Modal:
         modal = discord.ui.Modal(
             title=spec["title"],
-            custom_id=encode_custom_id(plugin_id, spec["action"], route_token),
+            custom_id=encode_custom_id(
+                plugin_id, spec["action"], route_token, component_value
+            ),
         )
         styles = {
             "short": discord.TextStyle.short,
@@ -283,7 +288,10 @@ class DiscordPluginInteractionBridge:
         kind = result["kind"]
         if kind == "open_modal":
             payload = self._build_modal(
-                route["plugin_id"], route["route_token"], result["modal"]
+                route["plugin_id"],
+                route["route_token"],
+                result["modal"],
+                route.get("component_value"),
             )
         elif kind == "update_message":
             payload = self.build_message_kwargs(route["plugin_id"], result["message"])
