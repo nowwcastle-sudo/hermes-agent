@@ -125,7 +125,26 @@ class DiscordPluginInteractionBridge:
             )
             return True
         if is_modal_open:
-            await self._apply_undeferred_result(interaction, route, normalized)
+            try:
+                prepared = self._prepare_undeferred_result(route, normalized)
+            except Exception:
+                await self._safe_error(
+                    interaction,
+                    deferred=False,
+                    operation="result_prepare",
+                    plugin_id=route["plugin_id"],
+                )
+                return True
+            try:
+                await self._apply_undeferred_result(interaction, prepared)
+            except Exception:
+                await self._safe_error(
+                    interaction,
+                    deferred=False,
+                    operation="result_apply",
+                    plugin_id=route["plugin_id"],
+                    respond=False,
+                )
         else:
             await self._apply_deferred_result(interaction, route, normalized)
         return True
@@ -146,6 +165,7 @@ class DiscordPluginInteractionBridge:
         deferred: bool,
         operation: str,
         plugin_id: str,
+        respond: bool = True,
     ) -> None:
         trace_id = uuid.uuid4().hex
         logger.error(
@@ -154,11 +174,23 @@ class DiscordPluginInteractionBridge:
             plugin_id,
             trace_id,
         )
+        if not respond:
+            return
         content = f"요청을 처리하지 못했어. 추적 ID: {trace_id}"
-        if deferred:
-            await interaction.followup.send(content, ephemeral=True)
-        else:
-            await DiscordPluginInteractionBridge._ephemeral_once(interaction, content)
+        try:
+            if deferred:
+                await interaction.followup.send(content, ephemeral=True)
+            else:
+                await DiscordPluginInteractionBridge._ephemeral_once(
+                    interaction, content
+                )
+        except Exception:
+            logger.error(
+                "discord_plugin_interaction_failed operation=error_response "
+                "plugin=%s trace=%s",
+                plugin_id,
+                trace_id,
+            )
 
     @staticmethod
     async def _defer_once(interaction: Any) -> bool:
@@ -243,26 +275,38 @@ class DiscordPluginInteractionBridge:
             )
         return modal
 
-    async def _apply_undeferred_result(
+    def _prepare_undeferred_result(
         self,
-        interaction: Any,
         route: dict[str, str],
         result: dict[str, Any],
+    ) -> tuple[str, Any]:
+        kind = result["kind"]
+        if kind == "open_modal":
+            payload = self._build_modal(
+                route["plugin_id"], route["route_token"], result["modal"]
+            )
+        elif kind == "update_message":
+            payload = self.build_message_kwargs(route["plugin_id"], result["message"])
+        elif kind == "ephemeral":
+            payload = result["content"]
+        else:
+            payload = "처리했어."
+        return kind, payload
+
+    @staticmethod
+    async def _apply_undeferred_result(
+        interaction: Any,
+        prepared: tuple[str, Any],
     ) -> None:
-        if result["kind"] == "open_modal" and not interaction.response.is_done():
-            await interaction.response.send_modal(
-                self._build_modal(
-                    route["plugin_id"], route["route_token"], result["modal"]
-                )
-            )
-        elif result["kind"] == "update_message" and not interaction.response.is_done():
-            await interaction.response.edit_message(
-                **self.build_message_kwargs(route["plugin_id"], result["message"])
-            )
-        elif result["kind"] == "ephemeral":
-            await self._ephemeral_once(interaction, result["content"])
-        elif result["kind"] == "no_change":
-            await self._ephemeral_once(interaction, "처리했어.")
+        kind, payload = prepared
+        if interaction.response.is_done():
+            return
+        if kind == "open_modal":
+            await interaction.response.send_modal(payload)
+        elif kind == "update_message":
+            await interaction.response.edit_message(**payload)
+        else:
+            await interaction.response.send_message(payload, ephemeral=True)
 
     async def _apply_deferred_result(
         self,

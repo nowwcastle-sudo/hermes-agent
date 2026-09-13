@@ -287,16 +287,6 @@ def _json_copy(value: object, error: str) -> object:
         raise ValueError(error) from exc
 
 
-def _text_size(value: object) -> int:
-    if isinstance(value, str):
-        return len(value)
-    if isinstance(value, list):
-        return sum(_text_size(item) for item in value)
-    if isinstance(value, dict):
-        return sum(_text_size(item) for item in value.values())
-    return 0
-
-
 def validate_message_spec(spec: dict) -> dict:
     """Validate and copy a version-one Discord message specification."""
     normalized = _json_copy(spec, _MESSAGE_ERROR)
@@ -306,10 +296,52 @@ def validate_message_spec(spec: dict) -> dict:
         or normalized["api_version"] != INTERACTIONS_CONTRACT_VERSION
         or isinstance(normalized["api_version"], bool)
         or not isinstance(normalized["content"], str)
+        or len(normalized["content"]) > 2_000
         or not isinstance(normalized["embeds"], list)
+        or len(normalized["embeds"]) > 10
         or not isinstance(normalized["components"], list)
         or len(normalized["components"]) > 25
     ):
+        raise ValueError(_MESSAGE_ERROR)
+
+    embed_text_size = 0
+    for embed in normalized["embeds"]:
+        if not isinstance(embed, dict):
+            raise ValueError(_MESSAGE_ERROR)
+        title = embed.get("title", "")
+        description = embed.get("description", "")
+        color = embed.get("color")
+        fields = embed.get("fields", [])
+        if (
+            not set(embed).issubset({"title", "description", "color", "fields"})
+            or not isinstance(title, str)
+            or len(title.strip()) > 256
+            or not isinstance(description, str)
+            or len(description.strip()) > 4_096
+            or (
+                "color" in embed
+                and (isinstance(color, bool) or not isinstance(color, int))
+            )
+            or not isinstance(fields, list)
+            or len(fields) > 25
+        ):
+            raise ValueError(_MESSAGE_ERROR)
+        embed_text_size += len(title.strip()) + len(description.strip())
+        for field in fields:
+            if (
+                not isinstance(field, dict)
+                or not set(field).issubset({"name", "value", "inline"})
+                or not isinstance(field.get("name"), str)
+                or len(field["name"].strip()) > 256
+                or not isinstance(field.get("value"), str)
+                or len(field["value"].strip()) > 1_024
+                or ("inline" in field and not isinstance(field["inline"], bool))
+            ):
+                raise ValueError(_MESSAGE_ERROR)
+            embed_text_size += len(field["name"].strip()) + len(
+                field["value"].strip()
+            )
+    if embed_text_size > 6_000:
         raise ValueError(_MESSAGE_ERROR)
 
     for component in normalized["components"]:
@@ -326,7 +358,7 @@ def validate_message_spec(spec: dict) -> dict:
             or not isinstance(component["route_token"], str)
             or not _TOKEN_RE.fullmatch(component["route_token"])
             or not isinstance(component["label"], str)
-            or not 1 <= len(component["label"]) <= 70
+            or not 1 <= len(component["label"]) <= 80
             or not isinstance(component["style"], str)
             or component["style"] not in _BUTTON_STYLES
             or type(component["disabled"]) is not bool
@@ -340,11 +372,6 @@ def validate_message_spec(spec: dict) -> dict:
         ):
             raise ValueError(_MESSAGE_ERROR)
 
-    visible = normalized["content"] + "".join(
-        component["label"] for component in normalized["components"]
-    )
-    if len(visible) + _text_size(normalized["embeds"]) > 4_000:
-        raise ValueError(_MESSAGE_ERROR)
     return normalized
 
 

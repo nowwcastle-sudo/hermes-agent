@@ -642,6 +642,160 @@ def test_message_spec_returns_independent_json_copy() -> None:
 
 
 @pytest.mark.parametrize(
+    ("name", "mutate"),
+    [
+        ("content", lambda spec: spec.update(content="x" * 2_000)),
+        ("embed-count", lambda spec: spec.update(embeds=[{} for _ in range(10)])),
+        ("embed-title", lambda spec: spec.update(embeds=[{"title": "x" * 256}])),
+        (
+            "embed-description",
+            lambda spec: spec.update(embeds=[{"description": "x" * 4_096}]),
+        ),
+        (
+            "embed-field-count",
+            lambda spec: spec.update(
+                embeds=[
+                    {
+                        "fields": [
+                            {"name": "n", "value": "v"} for _ in range(25)
+                        ]
+                    }
+                ]
+            ),
+        ),
+        (
+            "embed-field-name",
+            lambda spec: spec.update(
+                embeds=[{"fields": [{"name": "x" * 256, "value": "v"}]}]
+            ),
+        ),
+        (
+            "embed-field-value",
+            lambda spec: spec.update(
+                embeds=[{"fields": [{"name": "n", "value": "x" * 1_024}]}]
+            ),
+        ),
+        (
+            "embed-total",
+            lambda spec: spec.update(
+                embeds=[{"description": "x" * 3_000} for _ in range(2)]
+            ),
+        ),
+    ],
+)
+def test_message_spec_accepts_exact_discord_native_message_limits(
+    name: str, mutate
+) -> None:
+    spec = valid_message_spec()
+    mutate(spec)
+
+    assert validate_message_spec(spec) == spec, name
+
+
+def test_message_spec_excludes_trimmed_embed_whitespace_from_limits() -> None:
+    spec = valid_message_spec()
+    spec["embeds"] = [
+        {
+            "title": "x" * 256 + " ",
+            "description": " " + "x" * 4_096,
+            "fields": [
+                {
+                    "name": "x" * 256 + " ",
+                    "value": " " + "x" * 1_024,
+                }
+            ],
+        }
+    ]
+
+    assert validate_message_spec(spec) == spec
+
+
+def test_message_spec_trims_whitespace_for_aggregate_embed_budget() -> None:
+    spec = valid_message_spec()
+    spec["embeds"] = [
+        {"description": " " + "x" * 3_000},
+        {"description": "x" * 3_000 + " "},
+    ]
+
+    assert validate_message_spec(spec) == spec
+
+
+def test_message_spec_accepts_exact_discord_button_label_limit() -> None:
+    spec = valid_message_spec()
+    spec["components"][0]["label"] = "x" * 80
+
+    assert validate_message_spec(spec) == spec
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda spec: spec["embeds"][0].update(url="https://example.com"),
+        lambda spec: spec["embeds"][0]["fields"][0].update(extra=True),
+    ],
+)
+def test_message_spec_rejects_unknown_embed_fields(mutate) -> None:
+    spec = valid_message_spec()
+    spec["embeds"] = [{"fields": [{"name": "n", "value": "v"}]}]
+    mutate(spec)
+
+    with pytest.raises(ValueError, match="message spec"):
+        validate_message_spec(spec)
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate"),
+    [
+        ("content", lambda spec: spec.update(content="x" * 2_001)),
+        ("embed-count", lambda spec: spec.update(embeds=[{} for _ in range(11)])),
+        ("embed-title", lambda spec: spec.update(embeds=[{"title": "x" * 257}])),
+        (
+            "embed-description",
+            lambda spec: spec.update(embeds=[{"description": "x" * 4_097}]),
+        ),
+        (
+            "embed-field-count",
+            lambda spec: spec.update(
+                embeds=[
+                    {
+                        "fields": [
+                            {"name": "n", "value": "v"} for _ in range(26)
+                        ]
+                    }
+                ]
+            ),
+        ),
+        (
+            "embed-field-name",
+            lambda spec: spec.update(
+                embeds=[{"fields": [{"name": "x" * 257, "value": "v"}]}]
+            ),
+        ),
+        (
+            "embed-field-value",
+            lambda spec: spec.update(
+                embeds=[{"fields": [{"name": "n", "value": "x" * 1_025}]}]
+            ),
+        ),
+        (
+            "embed-total",
+            lambda spec: spec.update(
+                embeds=[{"description": "x" * 3_000}, {"description": "x" * 3_001}]
+            ),
+        ),
+    ],
+)
+def test_message_spec_rejects_discord_native_message_limits_plus_one(
+    name: str, mutate
+) -> None:
+    spec = valid_message_spec()
+    mutate(spec)
+
+    with pytest.raises(ValueError, match="message spec"):
+        validate_message_spec(spec)
+
+
+@pytest.mark.parametrize(
     "mutate",
     [
         lambda spec: spec.update(extra=True),
@@ -653,7 +807,7 @@ def test_message_spec_returns_independent_json_copy() -> None:
         lambda spec: spec["components"][0].update(custom_id="plugin-owned"),
         lambda spec: spec["components"][0].update(action="SubmitChoice"),
         lambda spec: spec["components"][0].update(route_token="short"),
-        lambda spec: spec["components"][0].update(label="x" * 71),
+        lambda spec: spec["components"][0].update(label="x" * 81),
         lambda spec: spec["components"][0].update(style="link"),
         lambda spec: spec["components"][0].update(value=0),
         lambda spec: spec["components"][0].update(disabled=0),
