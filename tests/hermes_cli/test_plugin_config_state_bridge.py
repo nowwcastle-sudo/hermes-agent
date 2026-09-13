@@ -240,6 +240,16 @@ def test_state_compare_and_set_can_claim_absent_key(isolated_home: Path) -> None
     assert state.get("quiz") == {"revision": 1}
 
 
+def test_state_compare_and_set_does_not_claim_present_json_null(
+    isolated_home: Path,
+) -> None:
+    state = _context().state
+    state.set("quiz", None)
+
+    assert state.compare_and_set("quiz", expected=None, value={"revision": 1}) is False
+    assert json.loads(state.path.read_text(encoding="utf-8")) == {"quiz": None}
+
+
 def test_state_compare_and_set_quota_failure_preserves_primary_and_backup(
     isolated_home: Path,
 ) -> None:

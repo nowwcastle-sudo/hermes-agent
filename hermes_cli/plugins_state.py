@@ -205,7 +205,10 @@ class PluginState:
         self._validate_key(key)
         with _locked_plugin_state(self.path):
             data = self._read_unlocked()
-            if data.get(key) != expected:
+            if expected is None:
+                if key in data:
+                    return False
+            elif key not in data or data[key] != expected:
                 return False
             next_data = dict(data)
             next_data[key] = value
